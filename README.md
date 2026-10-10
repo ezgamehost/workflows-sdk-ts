@@ -116,7 +116,7 @@ workflows-stack (`workflows-stack all` on Postgres and an S3 fixture, with a fak
 completion, idempotent start, sleep and payload replay, step retries, a process killed mid-step,
 cancel with cleanup, retry from failure, and exact JSON replay (key order and NUL characters). The CI job `e2e` runs it with the same secret rule.
 
-Verified end to end against workflows-stack 9ab418f (`scripts/e2e.sh`, run against the shared test
+Verified end to end against workflows-stack bd9eae3 (`scripts/e2e.sh`, run against the shared test
 fixtures; CI job e2e, which runs once `WORKFLOWS_STACK_READ_TOKEN` exists).
 
 `test/vectors` is a verbatim copy of workflows-stack's `protocol/vectors` at the commit in
