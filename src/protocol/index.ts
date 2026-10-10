@@ -2,7 +2,8 @@ import type { RetryPolicy } from "./types.ts"
 
 export type * from "./types.ts"
 export { MAX_OUTPUT_BYTES, backoff, encodeValue, jsonByteLength, parseDuration } from "./codec.ts"
-export { MAX_SIGNATURE_AGE_SECONDS, SECRET_PREFIX, SIGNATURE_HEADER, SignatureError, decodeSecret, sign, verify } from "./signature.ts"
+export { MAX_SIGNATURE_AGE_SECONDS, MAX_SIGNATURES, SECRET_PREFIX, SIGNATURE_HEADER, SignatureError, decodeSecret, parseSignature, sign, verify, verifyParsed } from "./signature.ts"
+export type { ParsedSignature } from "./signature.ts"
 export { stepId, validRunKey, validStepIdOverride, validWorkflowName } from "./stepid.ts"
 export { isInvocationToken, shardOf } from "./tokens.ts"
 

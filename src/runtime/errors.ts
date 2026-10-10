@@ -1,4 +1,5 @@
 import type { WireError } from "../protocol/index.ts"
+import { truncateUtf8, utf8Length } from "../protocol/bytes.ts"
 
 // A step error that retrying won't fix: the step fails at once (code workflows.non_retriable).
 export class NonRetriableError extends Error { override name = "NonRetriableError" }
@@ -9,7 +10,10 @@ export class RetryAfterError extends Error {
 }
 // Thrown into a workflow's pending call when its run is cancelled (code workflows.cancelled).
 export class CancelledError extends Error { override name = "CancelledError" }
-// Any other recorded error, rebuilt on replay with its wire code, name and data.
+// WorkflowError is an error with a code and JSON data, and what a recorded failure is rebuilt as
+// on replay. Codes on the wire are "user" or "workflows.*": any other code is sent as "user", with
+// the custom code as the name (when no name was given) and as data.code (when data is absent or a
+// plain object without a code), so a replay sees code "user" and finds the custom code there.
 export class WorkflowError extends Error {
   code: string
   data?: unknown
@@ -25,8 +29,13 @@ export class StepTimeout extends Error { override name = "StepTimeout" }
 export class DuplicateStepName extends Error { override name = "DuplicateStepName" }
 export class OutputTooLarge extends Error { override name = "OutputTooLarge" }
 
-const MAX_STACK = 8192
+const MAX_STACK_BYTES = 8192
+const MAX_MESSAGE_BYTES = 8192
+const MAX_DATA_BYTES = 65_536
 const MAX_DEPTH = 8
+const WIRE_CODE = /^(user|workflows\.[a-z_]+)$/
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype
 
 function codeOf(e: Error): string {
   if (e instanceof NonRetriableError) return "workflows.non_retriable"
@@ -42,14 +51,23 @@ function jsonData(v: unknown): unknown {
   try { return v === undefined ? undefined : JSON.parse(JSON.stringify(v)) } catch { return undefined }
 }
 
-// encodeError: the wire shape of anything a workflow throws (design, "Errors"). Causes nest at
-// most 8 deep and stacks are cut at 8 KiB.
+// encodeError: the wire shape of anything a workflow throws (design, "Errors"). Codes are "user"
+// or "workflows.*" (see WorkflowError); messages and stacks are cut to 8 KiB of UTF-8 and data
+// over 64 KiB of JSON is dropped; causes nest at most 8 deep.
 export function encodeError(e: unknown, depth = 0): WireError {
-  if (!(e instanceof Error)) return { code: "user", name: "Error", message: typeof e === "string" ? e : safeString(e) }
-  const w: WireError = { code: codeOf(e), name: e.name || "Error", message: String(e.message) }
-  const data = jsonData((e as { data?: unknown }).data)
-  if (data !== undefined) w.data = data
-  if (typeof e.stack === "string" && e.stack) w.stack = e.stack.slice(0, MAX_STACK)
+  if (!(e instanceof Error)) return { code: "user", name: "Error", message: truncateUtf8(typeof e === "string" ? e : safeString(e), MAX_MESSAGE_BYTES) }
+  let code = codeOf(e)
+  let name = e.name || "Error"
+  let data = jsonData((e as { data?: unknown }).data)
+  if (!WIRE_CODE.test(code)) {
+    if (e instanceof WorkflowError && name === "WorkflowError") name = code
+    if (data === undefined) data = { code }
+    else if (isPlainObject(data) && !("code" in data)) data = { ...data, code }
+    code = "user"
+  }
+  const w: WireError = { code, name: truncateUtf8(String(name), 256), message: truncateUtf8(String(e.message), MAX_MESSAGE_BYTES) }
+  if (data !== undefined && utf8Length(JSON.stringify(data)) <= MAX_DATA_BYTES) w.data = data
+  if (typeof e.stack === "string" && e.stack) w.stack = truncateUtf8(e.stack, MAX_STACK_BYTES)
   if (e.cause !== undefined && depth < MAX_DEPTH) w.cause = encodeError(e.cause, depth + 1)
   return w
 }

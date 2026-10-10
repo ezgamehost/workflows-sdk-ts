@@ -40,9 +40,16 @@ const caught = workflow("caught", async ({ step }) => {
   }
 })
 const explicitid = workflow("explicitid", async ({ step }) => step.run("x", () => 1, { id: "custom-1" }))
+const tuned = workflow("tuned", async ({ step }) => step.run("t", () => 1), { retry: { maxAttempts: 2 } })
+const effect = workflow("effect", async ({ input, step }) =>
+  step.run("effect", async () => { await (await fetch((input as { url: string }).url, { method: "POST" })).body?.cancel(); return "done" }))
+const coded = workflow("coded", async ({ step }) => step.run("coded", () => { throw new WorkflowError("teapot", { code: "http.418", data: { status: 418 } }) }))
+const widestack = workflow("widestack", async ({ step }) => step.run("wide", () => { const e = new Error("wide"); e.stack = "é".repeat(5000); throw e }))
+const widename = workflow("widename", async ({ step }) => step.run("é".repeat(200), () => 1))
+const dupeid = workflow("dupeid", async ({ step }) => Promise.all([step.run("a", () => 1, { id: "same" }), step.run("b", () => 2, { id: "same" })]))
 
 const handler = serve({
-  workflows: [sequence, echo, race, flaky, fatal, slow, sleepy, values, dupe, big, cancellable, caught, explicitid],
+  workflows: [sequence, echo, race, flaky, fatal, slow, sleepy, values, dupe, big, cancellable, caught, explicitid, tuned, effect, coded, widestack, widename, dupeid],
   signingSecrets: [process.env.CONFORMANCE_SECRET!], maxInvocationSeconds: 300, deployment: "conformance",
 })
 Bun.serve({ hostname: "127.0.0.1", port: Number(process.env.PORT ?? 3100), fetch: handler })

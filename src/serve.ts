@@ -1,5 +1,5 @@
 import type { InvocationResult, SyncReply } from "./protocol/index.ts"
-import { PROTOCOL_VERSION, SIGNATURE_HEADER, SignatureError, decodeSecret, verify } from "./protocol/index.ts"
+import { PROTOCOL_VERSION, SIGNATURE_HEADER, SignatureError, decodeSecret, parseSignature, verifyParsed } from "./protocol/index.ts"
 import { detectDeployment } from "./env.ts"
 import { execute } from "./runtime/execution.ts"
 import { InvalidInvocation, parseInvocation } from "./runtime/invocation.ts"
@@ -12,14 +12,18 @@ const json = (status: number, body: unknown) => new Response(JSON.stringify(body
 
 export interface ServeOptions {
   workflows: Workflow<any, any>[]
-  // The app's active signing secrets (whsec_…). Pass two during a rotation.
-  signingSecrets: string[]
+  // The app's active signing secrets (whsec_…); pass two during a rotation. They're decoded on the
+  // first request, so a build without the environment variable still works (undefined entries are
+  // skipped then; with none left, requests answer 500).
+  signingSecrets: (string | undefined)[]
   // How long your platform lets a request run (1–900, default 300); EZGH sets deadlines inside it.
   maxInvocationSeconds?: number
   // A deployment ID recorded with each invocation; detected on Vercel, Lambda and Cloud Run.
   deployment?: string
   // The fetch used to call workflows-live (tests and custom transports).
   fetch?: FetchLike
+  // Steps run per invocation before it ends and EZGH invokes the workflow again (default 50).
+  maxStepsPerInvocation?: number
 }
 
 class TooLarge extends Error {}
@@ -55,7 +59,11 @@ export function serve(opts: ServeOptions): (req: Request) => Promise<Response> {
     byName.set(w.name, w)
   }
   if (!Array.isArray(opts.signingSecrets) || opts.signingSecrets.length === 0) throw new TypeError("serve() needs at least one signing secret")
-  const secrets = opts.signingSecrets.map(decodeSecret)
+  for (const s of opts.signingSecrets) if (s !== undefined) decodeSecret(s) // a malformed secret fails now
+  let secrets: Uint8Array[] | undefined
+  const keys = () => (secrets ??= opts.signingSecrets.filter((s): s is string => typeof s === "string" && s !== "").map(decodeSecret))
+  if (opts.maxStepsPerInvocation !== undefined && (!Number.isInteger(opts.maxStepsPerInvocation) || opts.maxStepsPerInvocation < 1))
+    throw new TypeError("maxStepsPerInvocation is a whole number ≥ 1")
   const maxSeconds = opts.maxInvocationSeconds ?? 300
   if (!Number.isInteger(maxSeconds) || maxSeconds < 1 || maxSeconds > 900) throw new TypeError("maxInvocationSeconds is a whole number from 1 to 900")
   const deployment = opts.deployment ?? detectDeployment()
@@ -63,16 +71,25 @@ export function serve(opts: ServeOptions): (req: Request) => Promise<Response> {
   const fetchImpl: FetchLike = opts.fetch ?? ((u, i) => fetch(u, i))
 
   return async (req) => {
+    const receivedAt = Date.now()
     if (req.method !== "POST") return json(405, { code: "method_not_allowed" })
+    const active = keys()
+    if (active.length === 0) return json(500, { code: "sdk_error", message: "No signing secret is configured" })
+    // The header and its timestamp first: a stale or malformed signature costs no body read.
+    let sig
+    try { sig = parseSignature(req.headers.get(SIGNATURE_HEADER) ?? "", new Date(receivedAt)) } catch (e) {
+      if (e instanceof SignatureError) return json(401, { code: e.reason === "expired" ? "expired_signature" : "invalid_signature" })
+      return json(500, { code: "sdk_error" })
+    }
     let body: Uint8Array
     try { body = await readBody(req) } catch (e) {
-      if (e instanceof TooLarge) return json(413, { code: "too_large" })
+      if (e instanceof TooLarge) return json(413, { code: "payload_too_large" })
       return json(400, { code: "invalid_invocation" })
     }
     try {
-      await verify(req.headers.get(SIGNATURE_HEADER) ?? "", secrets, body, new Date())
+      await verifyParsed(sig, active, body)
     } catch (e) {
-      if (e instanceof SignatureError) return json(401, { code: e.reason === "expired" ? "expired_signature" : "invalid_signature" })
+      if (e instanceof SignatureError) return json(401, { code: "invalid_signature" })
       return json(500, { code: "sdk_error" })
     }
     let inv
@@ -91,8 +108,13 @@ export function serve(opts: ServeOptions): (req: Request) => Promise<Response> {
     const result = (commands: InvocationResult["commands"]): InvocationResult => ({ commands, ...(deployment ? { deployment } : {}), sdk })
     const wf = byName.get(inv.run!.workflow)
     if (!wf) return json(200, result([{ type: "workflowNotFound", workflow: inv.run!.workflow }]))
+    // The deadline on this machine's clock: the engine's budget (deadline − t), from receipt.
+    const deadline = receivedAt + (Date.parse(inv.deadline) - sig.t * 1000)
+    const total = Math.max(0, deadline - receivedAt)
+    const reserveMs = Math.max(5000, total * 0.1)
     try {
-      return json(200, result(await execute(inv, wf, httpLive(inv.endpoints.live, inv.token, fetchImpl))))
+      const io = httpLive(inv.endpoints.live, inv.token, fetchImpl, { deadline, reserveMs })
+      return json(200, result(await execute(inv, wf, io, { deadline, ...(opts.maxStepsPerInvocation ? { maxStepsPerInvocation: opts.maxStepsPerInvocation } : {}) })))
     } catch (e) {
       if (e instanceof InvocationSuperseded) return json(409, { code: "invocation_superseded" })
       if (e instanceof CheckpointFailed) return json(503, { code: "checkpoint_failed" })

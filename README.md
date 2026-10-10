@@ -33,7 +33,7 @@ when you create the app; pass two during a rotation):
 ```ts
 import { serve } from "@ezgh/workflows"
 
-export const POST = serve({ workflows: [onboarding], signingSecrets: [process.env.EZGH_WORKFLOWS_SIGNING_SECRET!] })
+export const POST = serve({ workflows: [onboarding], signingSecrets: [process.env.EZGH_WORKFLOWS_SIGNING_SECRET] })
 ```
 
 `serve` returns a Fetch-API handler `(Request) => Promise<Response>`. Examples:
@@ -71,15 +71,26 @@ await client.cancel(run.id)                // or client.retry(run.id) after a fa
   fail the step without retries. A result over 1 MiB fails the step too.
 - **Code between steps re-runs on every replay**, so keep it deterministic: read the time and
   random values through `step.now(name)` and `step.uuid(name)`.
-- **Step names identify steps.** The *n*th call with a name is that name's *n*th step. Two steps
-  pending at the same time (in `Promise.all` or `Promise.race`) need distinct names or an
-  explicit `{ id }`. Replays resolve recorded steps in the order they completed, so races take
+- **Step names identify steps.** A name is 1–256 bytes of UTF-8, and the *n*th call with a name
+  is that name's *n*th step. Two steps pending at the same time (in `Promise.all` or
+  `Promise.race`) need distinct names or distinct explicit `{ id }`s. Replays resolve recorded steps in the order they completed, so races take
   the same branch every time.
 - **Retries:** a step that throws is retried with backoff (default 5 attempts, from 1 s doubling to
-  at most 10 minutes; override per step with `{ retry }`, or per workflow). Throw
+  at most 10 minutes; override per step with `{ retry }`, or per workflow; partial policies are
+  merged with the defaults). Bounds: `maxAttempts` 1–100, `maxMs` up to 24 hours, `multiplier`
+  1–10. Throw
   `NonRetriableError` to fail at once, or `RetryAfterError(message, delayMs)` to pick the delay.
   On replay a recorded failure is rethrown as a `WorkflowError` (or the SDK class it was), with
-  its `code`, `name`, `data` and `cause`.
+  its `code`, `name`, `data` and `cause`. Error codes on the wire are `user` or `workflows.*`: a
+  `WorkflowError` with another code is sent as `user`, its code kept as the name and in
+  `data.code`. Messages and stacks are cut to 8 KiB, and `data` over 64 KiB is dropped.
+- **Timeouts:** with `{ timeoutMs }` a step that runs too long fails with
+  `workflows.step_timeout` (retryable). The step function gets `{ signal, attempt,
+  idempotencyKey }`; `signal` aborts at the timeout, so pass it to `fetch`.
+- **Invocation time:** an invocation stops starting steps when less than max(5 s, 10 %) of its
+  time is left, and EZGH invokes the workflow again. The deadline is measured on your machine's
+  clock from when the request arrived, so clock skew doesn't matter. Calls to EZGH that are
+  rate-limited or briefly unavailable are retried within that time.
 - **Cancellation:** cancelling a run throws `CancelledError` from the call the workflow is
   waiting on. `finally` and `catch` blocks can still run `step.run` cleanup steps; sleeps and
   new values are refused. The run then ends `cancelled`.
@@ -103,9 +114,9 @@ at `.workflows-stack-rev` (it reads the internal workflows-stack repo with the
 `scripts/e2e.sh <workflows-stack checkout>` runs the SDK end to end against the real
 workflows-stack (`workflows-stack all` on Postgres and an S3 fixture, with a fake org-api):
 completion, idempotent start, sleep and payload replay, step retries, a process killed mid-step,
-cancel with cleanup, and retry from failure. The CI job `e2e` runs it with the same secret rule.
+cancel with cleanup, retry from failure, and exact JSON replay (key order and NUL characters). The CI job `e2e` runs it with the same secret rule.
 
-Verified end to end against workflows-stack 59d8066 (`scripts/e2e.sh`, run against the shared test
+Verified end to end against workflows-stack 9ab418f (`scripts/e2e.sh`, run against the shared test
 fixtures; CI job e2e, which runs once `WORKFLOWS_STACK_READ_TOKEN` exists).
 
 `test/vectors` is a verbatim copy of workflows-stack's `protocol/vectors` at the commit in

@@ -31,8 +31,16 @@ const fixable = workflow("e2e-fixable", async ({ step }) => {
   return step.run("work", () => { if (!read().fixed) throw new NonRetriableError("not fixed yet"); return "fixed" })
 })
 
+// Recorded JSON replays exactly: key order and NUL characters survive the journal (a sleep forces
+// the replay).
+const exact = workflow("e2e-exact", async ({ step }) => {
+  const v = await step.run("make", () => JSON.parse('{"b":1,"a":"x\\u0000y","c":{"z":[2,1],"y":null}}') as unknown)
+  await step.sleep("nap", "1s")
+  return step.run("echo", () => v)
+})
+
 const handler = serve({
-  workflows: [complete, sleepy, retry, crash, cancel, fixable],
+  workflows: [complete, sleepy, retry, crash, cancel, fixable, exact],
   signingSecrets: [process.env.EZGH_WORKFLOWS_SIGNING_SECRET!], maxInvocationSeconds: 60, deployment: "e2e",
 })
 Bun.serve({

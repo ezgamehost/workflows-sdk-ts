@@ -8,6 +8,14 @@ const app = process.env.E2E_APP ?? "http://127.0.0.1:3200"
 const client = new Client({ apiKey: process.env.E2E_API_KEY!, organizationId: process.env.E2E_ORG!, projectId: process.env.E2E_PROJECT!, baseUrl: api, retries: 90, maxRetryDelayMs: 2000 })
 const appId = process.env.E2E_APP_ID!
 
+// An API error anywhere fails the run with its status and code (not just a stack trace).
+process.on("uncaughtException", (e) => {
+  if (e instanceof WorkflowsApiError) console.error(`FAILED: the API answered ${e.status} ${e.code}: ${e.message}`)
+  else console.error("FAILED:", e)
+  process.exit(1)
+})
+process.on("unhandledRejection", (e) => { throw e })
+
 function check(cond: unknown, what: string, detail?: unknown): asserts cond {
   if (!cond) { console.error(`FAILED: ${what}`, JSON.stringify(detail, null, 2)); process.exit(1) }
 }
@@ -23,7 +31,7 @@ const stepNamed = (r: Run, name: string) => r.steps?.find((s) => s.name === name
 const state = async () => (await (await fetch(`${app}/__e2e/state`)).json()) as { cleanup: number; prepare: number }
 
 const synced = await client.sync(appId)
-check(synced.syncStatus === "synced" && synced.workflows.length === 6 && synced.deployment === "e2e" && synced.sdk?.name === "@ezgh/workflows", "sync records the app's workflows", synced)
+check(synced.syncStatus === "synced" && synced.workflows.length === 7 && synced.deployment === "e2e" && synced.sdk?.name === "@ezgh/workflows", "sync records the app's workflows", synced)
 console.log("ok   sync")
 
 const complete = await until((await client.start(appId, "e2e-complete")).id, terminal)
@@ -66,5 +74,12 @@ const fixed = await until(fixable.id, (r) => r.status === "completed" || (r.stat
 const state2 = await state()
 check(fixed.status === "completed" && (await client.output(fixed.id)) === "fixed" && state2.prepare === 1, "retry resumes from the failed step without re-running completed ones", { fixed, state2 })
 console.log("ok   retry from failure")
+
+if (process.env.E2E_EXACT_JSON === "1") {
+  const exact = await until((await client.start(appId, "e2e-exact")).id, terminal)
+  const text = JSON.stringify(await client.output(exact.id))
+  check(exact.status === "completed" && text === '{"b":1,"a":"x\\u0000y","c":{"z":[2,1],"y":null}}', "recorded JSON replays with its key order and NUL characters", { exact, text })
+  console.log("ok   exact JSON replay")
+} else console.log("skip exact JSON replay (this workflows-stack has no json-column migration 0005 yet)")
 
 console.log("PASSED")

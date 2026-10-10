@@ -52,23 +52,30 @@ const id = encodeURIComponent
 // Client calls the Workflows API for one project: apps (create, sync, rotate the secret) and runs
 // (start, inspect, cancel, retry, payloads, events).
 export class Client {
-  private base: string
-  private f: FetchLike
-  constructor(private opts: ClientOptions) {
-    this.base = `${(opts.baseUrl ?? "https://workflows-api.ezghcloud.com").replace(/\/+$/, "")}/v1/organizations/${id(opts.organizationId)}/projects/${id(opts.projectId)}`
-    this.f = opts.fetch ?? ((u, i) => fetch(u, i))
+  // ES private fields: the API key never shows in console.log, util.inspect or JSON.stringify.
+  readonly #apiKey: string
+  readonly #base: string
+  readonly #fetch: FetchLike
+  readonly #retries: number
+  readonly #maxDelay: number
+  constructor(opts: ClientOptions) {
+    this.#apiKey = opts.apiKey
+    this.#base = `${(opts.baseUrl ?? "https://workflows-api.ezghcloud.com").replace(/\/+$/, "")}/v1/organizations/${id(opts.organizationId)}/projects/${id(opts.projectId)}`
+    this.#fetch = opts.fetch ?? ((u, i) => fetch(u, i))
+    this.#retries = opts.retries ?? 3
+    this.#maxDelay = opts.maxRetryDelayMs ?? 10_000
   }
 
   private async call<T>(method: string, path: string, body?: unknown, idempotencyKey?: string): Promise<T> {
-    const headers: Record<string, string> = { Authorization: `Bearer ${this.opts.apiKey}`, Accept: "application/json" }
+    const headers: Record<string, string> = { Authorization: `Bearer ${this.#apiKey}`, Accept: "application/json" }
     if (body !== undefined) headers["Content-Type"] = "application/json"
     if (method !== "GET") headers["Idempotency-Key"] = idempotencyKey ?? crypto.randomUUID()
-    const retries = this.opts.retries ?? 3
-    const maxDelay = this.opts.maxRetryDelayMs ?? 10_000
+    const retries = this.#retries
+    const maxDelay = this.#maxDelay
     for (let attempt = 0; ; attempt++) {
       let res: Response
       try {
-        res = await this.f(this.base + path, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) })
+        res = await this.#fetch(this.#base + path, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) })
       } catch (e) {
         if (attempt >= retries) throw e
         await sleep(Math.min(maxDelay, 500 * 2 ** attempt))

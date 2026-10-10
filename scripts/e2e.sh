@@ -17,6 +17,8 @@ export E2E_ORG=0199a3c2-5b1e-7d40-9f3a-2c8e6b1d4f70 E2E_PROJECT=0199a3c2-6c2f-7e
 # does), the KEK and service credential have local defaults, and REDIS_URL is optional.
 export APP_ENV=local REGION=us-local-1 INTERNAL_API_TOKEN=e2e-internal-token
 export ORG_API_URL=http://127.0.0.1:4100 WORKFLOWS_LIVE_URL=http://127.0.0.1:6150 WORKFLOWS_EGRESS_ALLOW_LOCAL=1
+# Exact JSON replay (key order, NUL) needs the engine's json-column migration 0005.
+if compgen -G "$stack/internal/store/migrations/0005_*" > /dev/null; then export E2E_EXACT_JSON=1; fi
 E2E_STATE=$(mktemp) && rm -f "$E2E_STATE" && export E2E_STATE
 pids=()
 cleanup() { for p in "${pids[@]}"; do pkill -P "$p" 2>/dev/null || true; kill "$p" 2>/dev/null || true; done; }

@@ -11,32 +11,66 @@ export class InvocationSuperseded extends Error { override name = "InvocationSup
 // workflows-live refused or couldn't take a call after retries: the step must not run.
 export class CheckpointFailed extends Error { override name = "CheckpointFailed" }
 
-export interface LiveOptions { attempts?: number; retryDelayMs?: number }
+export interface LiveOptions {
+  // The invocation's local deadline (epoch ms). Each call is aborted at it, and 429/5xx answers and
+  // network errors are retried (after Retry-After, or backoff) while more than reserveMs would
+  // remain. Without a deadline: 4 attempts, each call aborted after 30 s.
+  deadline?: number
+  reserveMs?: number
+  now?: () => number
+  // Without a deadline: attempts and the first backoff delay (tests).
+  attempts?: number
+  retryDelayMs?: number
+}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+const MAX_BACKOFF_MS = 5000
+
+function retryAfterMs(res: Response): number | undefined {
+  const v = res.headers.get("Retry-After")
+  if (!v) return undefined
+  const n = Number(v)
+  if (Number.isFinite(n) && n >= 0) return n * 1000
+  const at = Date.parse(v)
+  return Number.isNaN(at) ? undefined : Math.max(0, at - Date.now())
+}
 
 // httpLive talks to workflows-live (plan D2, D25) with Authorization: Bearer <invocation token>.
-// 409 means superseded; 429, 5xx and network errors are retried with backoff; anything else
-// non-2xx fails the invocation.
+// 409 means superseded; 429, 5xx and network errors are retried; anything else non-2xx fails
+// the invocation (CheckpointFailed).
 export function httpLive(base: string, token: string, fetchImpl: FetchLike = (u, i) => fetch(u, i), opts: LiveOptions = {}): LiveIO {
   const root = base.replace(/\/+$/, "")
-  const attempts = opts.attempts ?? 4
-  const delay = opts.retryDelayMs ?? 200
+  const now = opts.now ?? Date.now
+  const reserve = opts.reserveMs ?? 0
+  const firstDelay = opts.retryDelayMs ?? 200
   async function call(path: string, init: RequestInit): Promise<Response> {
     const headers: Record<string, string> = { Authorization: `Bearer ${token}` }
     if (init.body !== undefined) headers["Content-Type"] = "application/json"
+    const what = path.split("?")[0]
     let last = ""
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      if (attempt > 0) await sleep(delay * 2 ** (attempt - 1))
-      let res: Response
-      try { res = await fetchImpl(root + path, { ...init, headers }) } catch (e) { last = e instanceof Error ? e.name : "network error"; continue }
-      if (res.ok) return res
-      await res.body?.cancel().catch(() => {})
-      if (res.status === 409) throw new InvocationSuperseded("The engine superseded this invocation")
-      if (res.status === 429 || res.status >= 500) { last = `HTTP ${res.status}`; continue }
-      throw new CheckpointFailed(`workflows-live answered ${res.status} for ${path.split("?")[0]}`)
+    for (let attempt = 0; ; attempt++) {
+      const timeout = opts.deadline === undefined ? 30_000 : opts.deadline - now()
+      if (timeout <= 0) throw new CheckpointFailed(`No time left for ${what}: ${last || "the deadline passed"}`)
+      let res: Response | undefined
+      let wait: number | undefined
+      try {
+        res = await fetchImpl(root + path, { ...init, headers, signal: AbortSignal.timeout(Math.max(1, Math.floor(timeout))) })
+      } catch (e) {
+        last = e instanceof Error ? e.name : "network error"
+      }
+      if (res) {
+        if (res.ok) return res
+        await res.body?.cancel().catch(() => {})
+        if (res.status === 409) throw new InvocationSuperseded("The engine superseded this invocation")
+        if (res.status !== 429 && res.status < 500) throw new CheckpointFailed(`workflows-live answered ${res.status} for ${what}`)
+        last = `HTTP ${res.status}`
+        wait = retryAfterMs(res)
+      }
+      const delay = wait ?? Math.min(MAX_BACKOFF_MS, firstDelay * 2 ** attempt)
+      const more = opts.deadline === undefined ? attempt + 1 < (opts.attempts ?? 4) : opts.deadline - now() - delay > reserve
+      if (!more) throw new CheckpointFailed(`workflows-live didn't take ${what}: ${last}`)
+      await sleep(delay)
     }
-    throw new CheckpointFailed(`workflows-live didn't answer ${path.split("?")[0]}: ${last}`)
   }
   return {
     async checkpoint(cp) {

@@ -66,11 +66,13 @@ describe("serve", () => {
     expect(await v2.json()).toMatchObject({ code: "invalid_invocation" })
     expect((await post("not json")).status).toBe(400)
   })
-  test("bodies over 8 MiB are 413", async () => {
+  test("bodies over 8 MiB are 413 (once the signature header is well formed and fresh)", async () => {
+    const headers = { "EZGH-Signature": `t=${Math.floor(Date.now() / 1000)},v1=${"0".repeat(64)}` }
     const big = new Uint8Array(8 * 1024 * 1024 + 1)
-    expect((await handler(new Request("https://app.test/", { method: "POST", body: big }))).status).toBe(413)
+    const res = await handler(new Request("https://app.test/", { method: "POST", body: big, headers }))
+    expect([res.status, await res.json()]).toEqual([413, { code: "payload_too_large" }])
     const stream = new ReadableStream({ start(c) { for (let i = 0; i < 9; i++) c.enqueue(new Uint8Array(1024 * 1024)); c.close() } })
-    expect((await handler(new Request("https://app.test/", { method: "POST", body: stream, duplex: "half" } as RequestInit))).status).toBe(413)
+    expect((await handler(new Request("https://app.test/", { method: "POST", body: stream, duplex: "half", headers } as RequestInit))).status).toBe(413)
   })
   test("a superseded checkpoint is 409, an unavailable live host 503", async () => {
     for (const [status, want, code] of [[409, 409, "invocation_superseded"], [400, 503, "checkpoint_failed"]] as const) {
@@ -81,7 +83,8 @@ describe("serve", () => {
   })
   test("an SDK failure is 500 sdk_error", async () => {
     const h = serve({ workflows: [hello], signingSecrets: [SECRET], fetch: (async () => { throw new Error("x") }) as unknown as typeof fetch })
-    const res = await post({ ...base, kind: "orchestrate", run, journal: { complete: false, entries: [] } }, { h })
+    // Live retries run to the time budget: a 7 s deadline leaves 2 s past the 5 s reserve.
+    const res = await post({ ...base, deadline: new Date(Date.now() + 7000).toISOString(), kind: "orchestrate", run, journal: { complete: false, entries: [] } }, { h })
     expect(res.status).toBe(503) // journal paging failed after retries: checkpoint_failed
     const broken = serve({ workflows: [hello], signingSecrets: [SECRET], fetch: (async () => Response.json("not a journal")) as unknown as typeof fetch })
     const res2 = await post({ ...base, kind: "orchestrate", run, journal: { complete: false, entries: [] } }, { h: broken })

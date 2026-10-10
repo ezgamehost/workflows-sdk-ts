@@ -35,3 +35,14 @@ export function concat(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
   out.set(b, a.length)
   return out
 }
+
+export const utf8Length = (s: string): number => utf8(s).length
+
+// truncateUtf8 cuts s to at most maxBytes of UTF-8, never inside a code point.
+export function truncateUtf8(s: string, maxBytes: number): string {
+  const b = utf8(s)
+  if (b.length <= maxBytes) return s
+  let cut = maxBytes
+  while (cut > 0 && (b[cut]! & 0xc0) === 0x80) cut--
+  return new TextDecoder().decode(b.subarray(0, cut))
+}

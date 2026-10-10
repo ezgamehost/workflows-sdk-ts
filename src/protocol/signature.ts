@@ -23,24 +23,40 @@ export function decodeSecret(secret: string): Uint8Array<ArrayBuffer> {
   return b
 }
 
-const key = (secret: Uint8Array, usage: KeyUsage) =>
-  crypto.subtle.importKey("raw", new Uint8Array(secret), { name: "HMAC", hash: "SHA-256" }, false, [usage])
+const key = (secret: Uint8Array) =>
+  crypto.subtle.importKey("raw", new Uint8Array(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
+const mac = async (secret: Uint8Array, payload: Uint8Array<ArrayBuffer>) =>
+  new Uint8Array(await crypto.subtle.sign("HMAC", await key(secret), payload))
+
+// equal compares in constant time for equal lengths.
+function equal(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false
+  let d = 0
+  for (let i = 0; i < a.length; i++) d |= a[i]! ^ b[i]!
+  return d === 0
+}
 
 // sign: EZGH-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256(secret, "<t>." + body)>, one v1 per secret.
 export async function sign(secrets: Uint8Array[], t: Date, body: Uint8Array): Promise<string> {
   const ts = Math.floor(t.getTime() / 1000)
   const payload = concat(utf8(`${ts}.`), body)
   const parts = [`t=${ts}`]
-  for (const s of secrets) parts.push(`v1=${toHex(new Uint8Array(await crypto.subtle.sign("HMAC", await key(s, "sign"), payload)))}`)
+  for (const s of secrets) parts.push(`v1=${toHex(await mac(s, payload))}`)
   return parts.join(",")
 }
 
-// verify throws SignatureError("invalid") for a malformed header or no matching signature, and
-// SignatureError("expired") when t is more than 300 s from now either way. crypto.subtle.verify
-// compares in constant time.
-export async function verify(header: string, secrets: Uint8Array[], body: Uint8Array, now: Date): Promise<void> {
-  let ts: number | undefined
-  const sigs: Uint8Array<ArrayBuffer>[] = []
+export const MAX_SIGNATURES = 8
+
+export interface ParsedSignature { t: number; signatures: Uint8Array[] }
+
+// parseSignature checks the header's shape and timestamp without the body, so a request with a
+// malformed or stale signature is refused before its body is read. It throws
+// SignatureError("invalid") for a malformed header (or more than 8 v1 values) and
+// SignatureError("expired") when t is more than 300 s from now either way.
+export function parseSignature(header: string, now: Date): ParsedSignature {
+  if (typeof header !== "string" || header.length > 1024) throw new SignatureError("invalid", "The EZGH-Signature header is missing or malformed")
+  let t: number | undefined
+  const signatures: Uint8Array[] = []
   for (const raw of header.split(",")) {
     const part = raw.trim()
     const i = part.indexOf("=")
@@ -49,16 +65,31 @@ export async function verify(header: string, secrets: Uint8Array[], body: Uint8A
     const v = part.slice(i + 1)
     if (k === "t") {
       if (!/^\d{1,12}$/.test(v)) throw new SignatureError("invalid", "The EZGH-Signature timestamp is malformed")
-      ts = Number(v)
-    } else if (k === "v1" && /^[0-9a-fA-F]{64}$/.test(v)) sigs.push(fromHex(v.toLowerCase()))
+      t = Number(v)
+    } else if (k === "v1" && /^[0-9a-fA-F]{64}$/.test(v)) {
+      if (signatures.length === MAX_SIGNATURES) throw new SignatureError("invalid", `The EZGH-Signature header has more than ${MAX_SIGNATURES} signatures`)
+      signatures.push(fromHex(v.toLowerCase()))
+    }
   }
-  if (ts === undefined || sigs.length === 0) throw new SignatureError("invalid", "The EZGH-Signature header is missing or malformed")
-  if (Math.abs(now.getTime() / 1000 - ts) > MAX_SIGNATURE_AGE_SECONDS)
+  if (t === undefined || signatures.length === 0) throw new SignatureError("invalid", "The EZGH-Signature header is missing or malformed")
+  if (Math.abs(now.getTime() / 1000 - t) > MAX_SIGNATURE_AGE_SECONDS)
     throw new SignatureError("expired", "The EZGH-Signature timestamp is more than 5 minutes from now")
-  const payload = concat(utf8(`${ts}.`), body)
+  return { t, signatures }
+}
+
+// verifyParsed checks a parsed signature against the body: one HMAC per secret, each candidate
+// compared in constant time.
+export async function verifyParsed(sig: ParsedSignature, secrets: Uint8Array[], body: Uint8Array): Promise<void> {
+  const payload = concat(utf8(`${sig.t}.`), body)
+  let ok = false
   for (const s of secrets) {
-    const k = await key(s, "verify")
-    for (const sig of sigs) if (await crypto.subtle.verify("HMAC", k, sig, payload)) return
+    const want = await mac(s, payload)
+    for (const got of sig.signatures) if (equal(want, got)) ok = true
   }
-  throw new SignatureError("invalid", "The EZGH-Signature doesn't match any signing secret")
+  if (!ok) throw new SignatureError("invalid", "The EZGH-Signature doesn't match any signing secret")
+}
+
+// verify = parseSignature then verifyParsed.
+export async function verify(header: string, secrets: Uint8Array[], body: Uint8Array, now: Date): Promise<void> {
+  await verifyParsed(parseSignature(header, now), secrets, body)
 }

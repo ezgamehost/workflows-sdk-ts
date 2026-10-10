@@ -1,17 +1,27 @@
 import type { Command, Invocation, JournalEntry, RetryPolicy, WireError } from "../protocol/index.ts"
 import { DEFAULT_RETRY, MAX_OUTPUT_BYTES, encodeValue, jsonByteLength, parseDuration, stepId, validStepIdOverride } from "../protocol/index.ts"
-import type { Step, StepRunOptions, WorkflowContext } from "./context.ts"
+import { utf8Length } from "../protocol/bytes.ts"
+import type { Step, StepRunContext, StepRunOptions, WorkflowContext } from "./context.ts"
 import { CancelledError, DuplicateStepName, NonRetriableError, OutputTooLarge, RetryAfterError, StepTimeout, decodeError, encodeError } from "./errors.ts"
 import type { LiveIO } from "./live.ts"
-import { checkRetry, checkTimeout, type Workflow } from "./workflow.ts"
+import { checkTimeout, mergeRetry, type Workflow } from "./workflow.ts"
 
-export interface ExecOptions { now?: () => Date; maxStepsPerInvocation?: number }
+export interface ExecOptions {
+  now?: () => Date
+  maxStepsPerInvocation?: number
+  // The invocation's deadline on this machine's clock (epoch ms). serve() passes receipt time +
+  // (invocation.deadline − the signature's t), so clock skew doesn't matter; default: deadline as sent.
+  deadline?: number
+}
+
+// The longest sleep: a run times out after a year at most.
+export const MAX_SLEEP_MS = 31_536_000_000
 
 type Kind = "run" | "sleep" | "value"
 interface Call {
-  order: number; name: string; kind: Kind; id: Promise<string>; stepId?: string; settled: boolean; explicit: boolean
+  order: number; name: string; kind: Kind; id: Promise<string>; stepId?: string; settled: boolean; explicit?: string
   resolve(v: unknown): void; reject(e: unknown): void
-  fn?: () => unknown; retry?: RetryPolicy; timeoutMs?: number; untilMs?: number; produce?: () => unknown
+  fn?: (ctx: StepRunContext) => unknown; retry?: RetryPolicy; timeoutMs?: number; untilMs?: number; produce?: () => unknown
 }
 
 const RECORDED = new Set(["completed", "failed", "cancelled"])
@@ -19,8 +29,6 @@ const idle = () => new Promise<void>((r) => setTimeout(r, 0))
 // quiet marks a promise handled, so a call the workflow never awaits (a race's loser, say) isn't an
 // unhandled rejection; whoever awaits it still sees the rejection.
 const quiet = <T>(p: Promise<T>): Promise<T> => { p.catch(() => {}); return p }
-const defined = <T extends object>(o: T | undefined): Partial<T> =>
-  Object.fromEntries(Object.entries(o ?? {}).filter(([, v]) => v !== undefined)) as Partial<T>
 
 // Execution replays a workflow against its journal and runs it forward (plan S2 "Semantics"):
 //  - recorded outcomes resolve one at a time, lowest seq first, with a macrotask yield before each;
@@ -44,17 +52,20 @@ class Execution {
   private readonly started: number
   private readonly deadline: number
 
-  constructor(private inv: Invocation, private wf: Workflow, private io: LiveIO, private now: () => Date, private maxSteps: number) {
+  constructor(private inv: Invocation, private wf: Workflow, private io: LiveIO, private now: () => Date, private maxSteps: number, deadline?: number) {
     this.started = now().getTime()
-    this.deadline = Date.parse(inv.deadline)
+    this.deadline = deadline ?? Date.parse(inv.deadline)
   }
 
   private register(kind: Kind, name: string, explicitId: string | undefined, extra: Partial<Call>): Promise<unknown> {
-    if (typeof name !== "string" || name.length === 0 || name.length > 256) return quiet(Promise.reject(new TypeError("A step name is 1–256 characters")))
+    if (typeof name !== "string" || name.length === 0 || utf8Length(name) > 256) return quiet(Promise.reject(new TypeError("A step name is 1–256 bytes of UTF-8")))
     if (explicitId !== undefined && !validStepIdOverride(explicitId)) return quiet(Promise.reject(new TypeError(`Step IDs match ^[A-Za-z0-9._:-]{1,128}$; got "${explicitId}"`)))
     let id: Promise<string>
-    if (explicitId !== undefined) id = Promise.resolve(explicitId)
-    else {
+    if (explicitId !== undefined) {
+      id = Promise.resolve(explicitId)
+      if (!this.fatal && this.calls.some((c) => !c.settled && c.explicit === explicitId))
+        this.fatal = encodeError(new DuplicateStepName(`Two steps with the id "${explicitId}" are pending at once; give each its own id`))
+    } else {
       const n = this.counters.get(name) ?? 0
       this.counters.set(name, n + 1)
       id = stepId(name, n)
@@ -62,7 +73,7 @@ class Execution {
         this.fatal = encodeError(new DuplicateStepName(`Two steps named "${name}" are pending at once; give each a distinct name or an { id }`))
     }
     return quiet(new Promise((resolve, reject) => {
-      this.calls.push({ order: this.calls.length, name, kind, id, settled: false, explicit: explicitId !== undefined, resolve, reject, ...extra })
+      this.calls.push({ order: this.calls.length, name, kind, id, settled: false, ...(explicitId !== undefined ? { explicit: explicitId } : {}), resolve, reject, ...extra })
       this.wake?.()
     }))
   }
@@ -71,23 +82,27 @@ class Execution {
     const self = this
     const step: Step = {
       run(name, fn, opts: StepRunOptions = {}) {
+        let retry: RetryPolicy
         try {
           if (typeof fn !== "function") throw new TypeError("step.run needs a function")
-          if (opts.retry) checkRetry(opts.retry)
           if (opts.timeoutMs !== undefined) checkTimeout(opts.timeoutMs)
+          retry = mergeRetry(self.wf.opts.retry ?? DEFAULT_RETRY, opts.retry)
         } catch (e) { return quiet(Promise.reject(e)) }
-        const retry = { ...DEFAULT_RETRY, ...defined(self.wf.opts.retry), ...defined(opts.retry) }
         const timeoutMs = opts.timeoutMs ?? self.wf.opts.timeoutMs
         return self.register("run", name, opts.id, { fn, retry, ...(timeoutMs ? { timeoutMs } : {}) }) as never
       },
       sleep(name, duration, opts = {}) {
         let ms: number
-        try { ms = parseDuration(duration) } catch (e) { return quiet(Promise.reject(e)) }
+        try {
+          ms = parseDuration(duration)
+          if (ms > MAX_SLEEP_MS) throw new TypeError("A sleep is at most a year")
+        } catch (e) { return quiet(Promise.reject(e)) }
         return self.register("sleep", name, opts.id, { untilMs: self.now().getTime() + ms }) as Promise<void>
       },
       sleepUntil(name, at, opts = {}) {
         const t = typeof at === "string" ? Date.parse(at) : at instanceof Date ? at.getTime() : NaN
-        if (Number.isNaN(t)) return quiet(Promise.reject(new TypeError("sleepUntil needs a valid time")))
+        if (!Number.isFinite(t)) return quiet(Promise.reject(new TypeError("sleepUntil needs a valid time")))
+        if (t - self.now().getTime() > MAX_SLEEP_MS) return quiet(Promise.reject(new TypeError("A sleep is at most a year")))
         return self.register("sleep", name, opts.id, { untilMs: t }) as Promise<void>
       },
       now(name) {
@@ -149,12 +164,20 @@ class Execution {
   private async runStep(c: Call, attempt: number): Promise<Command | undefined> {
     const sid = c.stepId!
     await this.checkpoint([...this.outbox.splice(0), { type: "stepStarted", stepId: sid, name: c.name, attempt, retry: c.retry!, ...(c.timeoutMs ? { timeoutMs: c.timeoutMs } : {}) }])
-    this.currentKey = `${this.inv.run!.id}:${sid}:${attempt}`
+    const key = `${this.inv.run!.id}:${sid}:${attempt}`
+    this.currentKey = key
+    const abort = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
-      const work = Promise.resolve().then(c.fn!)
+      const work = Promise.resolve().then(() => c.fn!({ signal: abort.signal, attempt, idempotencyKey: key }))
       const raw = c.timeoutMs
-        ? await Promise.race([work, new Promise((_, rej) => { timer = setTimeout(() => rej(new StepTimeout(`Step "${c.name}" ran past ${c.timeoutMs} ms`)), c.timeoutMs) })])
+        ? await Promise.race([work, new Promise((_, rej) => {
+          timer = setTimeout(() => {
+            const e = new StepTimeout(`Step "${c.name}" ran past ${c.timeoutMs} ms`)
+            abort.abort(e)
+            rej(e)
+          }, c.timeoutMs)
+        })])
         : await work
       let value: unknown
       try { value = encodeValue(raw) } catch (e) { throw new NonRetriableError((e as Error).message) }
@@ -213,7 +236,9 @@ class Execution {
       if (this.inv.cancel && !this.cancelThrown) { this.cancelThrown = true; c.settled = true; c.reject(new CancelledError("The run was cancelled")); continue }
       if (this.inv.kind === "step" && c.stepId !== this.inv.targetStepId) return this.end([])
       const entry = this.journal.get(c.stepId!)
-      if (entry && (entry.status === "sleeping" || entry.status === "running")) return this.end([])
+      // Any other recorded status (sleeping, running, waiting, or one a later version adds) means
+      // the engine is still waiting on it: end the invocation; only a retrying step runs again.
+      if (entry && entry.status !== "retrying") return this.end([])
       if (this.cancelThrown && c.kind !== "run") { c.settled = true; c.reject(new CancelledError("The run is cancelling: only step.run cleanup steps can run")); continue }
       if (c.kind === "value") {
         const value = encodeValue(c.produce!())
@@ -235,5 +260,5 @@ class Execution {
 // execute runs one invocation of wf and returns the commands of its InvocationResult. It throws
 // InvocationSuperseded or CheckpointFailed when a checkpoint isn't applied.
 export function execute(inv: Invocation, wf: Workflow, io: LiveIO, opts: ExecOptions = {}): Promise<Command[]> {
-  return new Execution(inv, wf, io, opts.now ?? (() => new Date()), opts.maxStepsPerInvocation ?? 50).run()
+  return new Execution(inv, wf, io, opts.now ?? (() => new Date()), opts.maxStepsPerInvocation ?? 50, opts.deadline).run()
 }
