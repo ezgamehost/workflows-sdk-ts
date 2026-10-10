@@ -109,7 +109,9 @@ didn't receive one.
 - **Invocation time:** an invocation stops starting steps when less than max(5 s, 10 %) of its
   time is left, and EZGH invokes the workflow again. The deadline is measured on your machine's
   clock from when the request arrived, so clock skew doesn't matter. Calls to EZGH that are
-  rate-limited or briefly unavailable are retried within that time.
+  rate-limited or briefly unavailable are retried within that time. When EZGH can't store a step's
+  output (its payload store is down), the invocation is retried later without using a step
+  attempt.
 - **Cancellation:** cancelling a run throws `CancelledError` from the call the workflow is
   waiting on. `finally` and `catch` blocks can still run `step.run` cleanup steps; sleeps and
   new values are refused. The run then ends `cancelled`.
@@ -137,7 +139,7 @@ workflows-stack (`workflows-stack all` on Postgres and an S3 fixture, with a fak
 completion, idempotent start, sleep and payload replay, step retries, a process killed mid-step,
 cancel with cleanup, retry from failure, and exact JSON replay (key order and NUL characters). The CI job `e2e` runs it with the same secret rule.
 
-Verified end to end against workflows-stack bd9eae3 (`scripts/e2e.sh`, run against the shared test
+Verified end to end against workflows-stack 0103ac1 (`scripts/e2e.sh`, run against the shared test
 fixtures; CI job e2e, which runs with the `WORKFLOWS_STACK_DEPLOY_KEY` secret).
 
 `test/vectors` is a verbatim copy of workflows-stack's `protocol/vectors` at the commit in

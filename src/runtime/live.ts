@@ -8,8 +8,26 @@ export interface LiveIO {
 }
 // The engine has moved on: another invocation owns the run. Stop at once.
 export class InvocationSuperseded extends Error { override name = "InvocationSuperseded" }
-// workflows-live refused or couldn't take a call after retries: the step must not run.
-export class CheckpointFailed extends Error { override name = "CheckpointFailed" }
+// workflows-live refused or couldn't take a call after retries: the step must not run. code is
+// what serve() tells dispatch: "payload_unavailable" when the live host's last answer was a 503
+// payload_unavailable (its payload store is down: dispatch charges no step attempt), else
+// "checkpoint_failed".
+export class CheckpointFailed extends Error {
+  override name = "CheckpointFailed"
+  constructor(message: string, readonly code: "checkpoint_failed" | "payload_unavailable" = "checkpoint_failed") { super(message) }
+}
+
+// errorCode reads the kit's {"error":{"code"}} from a small error body, or undefined.
+async function errorCode(res: Response): Promise<string | undefined> {
+  try {
+    const text = await res.text()
+    if (text.length > 64 * 1024) return undefined
+    const code = (JSON.parse(text) as { error?: { code?: unknown } }).error?.code
+    return typeof code === "string" ? code : undefined
+  } catch {
+    return undefined
+  }
+}
 
 export interface LiveOptions {
   // The invocation's local deadline (epoch ms). Each call is aborted at it, and 429/5xx answers and
@@ -48,28 +66,32 @@ export function httpLive(base: string, token: string, fetchImpl: FetchLike = (u,
     if (init.body !== undefined) headers["Content-Type"] = "application/json"
     const what = path.split("?")[0]
     let last = ""
+    let payloadDown = false // the last answer was 503 payload_unavailable
+    const failed = (message: string) => new CheckpointFailed(message, payloadDown ? "payload_unavailable" : "checkpoint_failed")
     for (let attempt = 0; ; attempt++) {
       const timeout = opts.deadline === undefined ? 30_000 : opts.deadline - now()
-      if (timeout <= 0) throw new CheckpointFailed(`No time left for ${what}: ${last || "the deadline passed"}`)
+      if (timeout <= 0) throw failed(`No time left for ${what}: ${last || "the deadline passed"}`)
       let res: Response | undefined
       let wait: number | undefined
       try {
         res = await fetchImpl(root + path, { ...init, headers, signal: AbortSignal.timeout(Math.max(1, Math.floor(timeout))) })
       } catch (e) {
         last = e instanceof Error ? e.name : "network error"
+        payloadDown = false
       }
       if (res) {
         if (res.ok) return res
-        await res.body?.cancel().catch(() => {})
+        const code = res.status === 503 ? await errorCode(res) : (await res.body?.cancel().catch(() => {}), undefined)
         if (res.status === 409) throw new InvocationSuperseded("The engine superseded this invocation")
         if (res.status !== 429 && res.status < 500) throw new CheckpointFailed(`workflows-live answered ${res.status} for ${what}`)
-        last = `HTTP ${res.status}`
+        last = code ? `HTTP ${res.status} ${code}` : `HTTP ${res.status}`
+        payloadDown = code === "payload_unavailable"
         wait = retryAfterMs(res)
       }
       // Retry-After never shortens the backoff (a 0 or a past date mustn't spin).
       const delay = Math.max(wait ?? 0, Math.min(MAX_BACKOFF_MS, firstDelay * 2 ** attempt))
       const more = opts.deadline === undefined ? attempt + 1 < (opts.attempts ?? 4) : opts.deadline - now() - delay > reserve
-      if (!more) throw new CheckpointFailed(`workflows-live didn't take ${what}: ${last}`)
+      if (!more) throw failed(`workflows-live didn't take ${what}: ${last}`)
       await sleep(delay)
     }
   }

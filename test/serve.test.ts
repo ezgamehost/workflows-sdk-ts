@@ -78,7 +78,8 @@ describe("serve", () => {
     for (const [status, want, code] of [[409, 409, "invocation_superseded"], [400, 503, "checkpoint_failed"]] as const) {
       const h = serve({ workflows: [hello], signingSecrets: [SECRET], fetch: (async () => new Response("{}", { status })) as unknown as typeof fetch })
       const res = await post({ ...base, kind: "orchestrate", run, journal: { complete: true, entries: [] } }, { h })
-      expect([res.status, await res.json()]).toEqual([want, { code }])
+      const body = await res.json()
+      expect([res.status, body]).toEqual([want, want === 503 ? { code, error: { code, message: expect.any(String) } } : { code }])
     }
   })
   test("an SDK failure is 500 sdk_error", async () => {

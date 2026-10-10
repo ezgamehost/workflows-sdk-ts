@@ -120,7 +120,9 @@ export function serve(opts: ServeOptions): (req: Request) => Promise<Response> {
       return json(200, result(await execute(inv, wf, io, { deadline, ...(opts.maxStepsPerInvocation ? { maxStepsPerInvocation: opts.maxStepsPerInvocation } : {}) })))
     } catch (e) {
       if (e instanceof InvocationSuperseded) return json(409, { code: "invocation_superseded" })
-      if (e instanceof CheckpointFailed) return json(503, { code: "checkpoint_failed" })
+      // The code goes top level (as before) and in the kit's error shape, which dispatch reads:
+      // payload_unavailable costs the run no step attempt.
+      if (e instanceof CheckpointFailed) return json(503, { code: e.code, error: { code: e.code, message: e.message } })
       return json(500, { code: "sdk_error" })
     }
   }
