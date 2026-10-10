@@ -109,7 +109,7 @@ bun run check        # typecheck, tests, build, a Node import smoke test, npm pa
 (workflows-stack `protocol/conformance/workflows.md`). `scripts/conformance.sh <workflows-stack
 checkout>` builds workflows-stack's harness and runs its scenarios against it; CI does the same
 at `.workflows-stack-rev` (it reads the internal workflows-stack repo with the
-`WORKFLOWS_STACK_READ_TOKEN` secret and skips with a notice without it).
+`WORKFLOWS_STACK_DEPLOY_KEY` secret, a read-only deploy key on workflows-stack, and skips with a notice without it).
 
 `scripts/e2e.sh <workflows-stack checkout>` runs the SDK end to end against the real
 workflows-stack (`workflows-stack all` on Postgres and an S3 fixture, with a fake org-api):
@@ -117,7 +117,7 @@ completion, idempotent start, sleep and payload replay, step retries, a process 
 cancel with cleanup, retry from failure, and exact JSON replay (key order and NUL characters). The CI job `e2e` runs it with the same secret rule.
 
 Verified end to end against workflows-stack bd9eae3 (`scripts/e2e.sh`, run against the shared test
-fixtures; CI job e2e, which runs once `WORKFLOWS_STACK_READ_TOKEN` exists).
+fixtures; CI job e2e, which runs with the `WORKFLOWS_STACK_DEPLOY_KEY` secret).
 
 `test/vectors` is a verbatim copy of workflows-stack's `protocol/vectors` at the commit in
 `.workflows-stack-rev`; refresh it with `scripts/sync-vectors.sh <workflows-stack checkout> [<commit>]`.

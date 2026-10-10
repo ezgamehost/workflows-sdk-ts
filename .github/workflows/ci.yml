@@ -30,7 +30,7 @@ jobs:
 
   # workflows-stack's conformance harness (cmd/workflows-conformance, protocol/conformance) against
   # conformance/app.ts, at the workflows-stack commit in .workflows-stack-rev. workflows-stack is
-  # internal: the job reads it with the WORKFLOWS_STACK_READ_TOKEN secret (read-only contents), and
+  # internal: the job reads it with the WORKFLOWS_STACK_DEPLOY_KEY secret (a read-only deploy key on workflows-stack), and
   # skips with a notice when the secret isn't set. Fork pull requests get no secrets: skipped.
   conformance:
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
@@ -38,10 +38,10 @@ jobs:
     steps:
       - id: token
         env:
-          TOKEN: ${{ secrets.WORKFLOWS_STACK_READ_TOKEN }}
+          TOKEN: ${{ secrets.WORKFLOWS_STACK_DEPLOY_KEY }}
         run: |
           if [ -n "$TOKEN" ]; then echo "present=true" >> "$GITHUB_OUTPUT"
-          else echo "::notice title=conformance skipped::WORKFLOWS_STACK_READ_TOKEN isn't set, so this job can't read ezgamehost/workflows-stack; the conformance harness didn't run."; fi
+          else echo "::notice title=conformance skipped::WORKFLOWS_STACK_DEPLOY_KEY isn't set, so this job can't read ezgamehost/workflows-stack; the conformance harness didn't run."; fi
       - if: steps.token.outputs.present == 'true'
         uses: actions/checkout@v7
       - if: steps.token.outputs.present == 'true'
@@ -52,7 +52,7 @@ jobs:
         with:
           repository: ezgamehost/workflows-stack
           ref: ${{ steps.rev.outputs.sha }}
-          token: ${{ secrets.WORKFLOWS_STACK_READ_TOKEN }}
+          ssh-key: ${{ secrets.WORKFLOWS_STACK_DEPLOY_KEY }}
           path: .workflows-stack
           persist-credentials: false
       - if: steps.token.outputs.present == 'true'
@@ -106,10 +106,10 @@ jobs:
     steps:
       - id: token
         env:
-          TOKEN: ${{ secrets.WORKFLOWS_STACK_READ_TOKEN }}
+          TOKEN: ${{ secrets.WORKFLOWS_STACK_DEPLOY_KEY }}
         run: |
           if [ -n "$TOKEN" ]; then echo "present=true" >> "$GITHUB_OUTPUT"
-          else echo "::notice title=e2e skipped::WORKFLOWS_STACK_READ_TOKEN isn't set, so this job can't read ezgamehost/workflows-stack; the end-to-end tests didn't run."; fi
+          else echo "::notice title=e2e skipped::WORKFLOWS_STACK_DEPLOY_KEY isn't set, so this job can't read ezgamehost/workflows-stack; the end-to-end tests didn't run."; fi
       - if: steps.token.outputs.present == 'true'
         uses: actions/checkout@v7
       - if: steps.token.outputs.present == 'true'
@@ -120,7 +120,7 @@ jobs:
         with:
           repository: ezgamehost/workflows-stack
           ref: ${{ steps.rev.outputs.sha }}
-          token: ${{ secrets.WORKFLOWS_STACK_READ_TOKEN }}
+          ssh-key: ${{ secrets.WORKFLOWS_STACK_DEPLOY_KEY }}
           path: .workflows-stack
           persist-credentials: false
       - if: steps.token.outputs.present == 'true'
