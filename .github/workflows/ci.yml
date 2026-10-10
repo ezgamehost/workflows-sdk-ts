@@ -1,7 +1,8 @@
 name: CI
 
 # check: typecheck, unit tests (with workflows-stack's protocol vectors, vendored in test/vectors),
-# the ESM build, a Node import smoke test and npm pack --dry-run.
+# the ESM build, a Node import smoke test, npm pack --dry-run, and a consumer type-check of the
+# packed package with TypeScript 5.4 and 5.6.
 on:
   push:
     branches: [main]
@@ -19,7 +20,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.2
       - uses: actions/setup-node@v7
@@ -27,11 +30,13 @@ jobs:
           node-version: 24
       - run: bun install --frozen-lockfile
       - run: bun run check
+      - run: scripts/types-compat.sh
 
   # workflows-stack's conformance harness (cmd/workflows-conformance, protocol/conformance) against
   # conformance/app.ts, at the workflows-stack commit in .workflows-stack-rev. workflows-stack is
   # internal: the job reads it with the WORKFLOWS_STACK_DEPLOY_KEY secret (a read-only deploy key on workflows-stack), and
-  # skips with a notice when the secret isn't set. Fork pull requests get no secrets: skipped.
+  # fails on a push to main when the secret is missing (so a deleted key can't turn main silently
+# green). Pull requests without it (forks get no secrets) skip with a notice.
   conformance:
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
@@ -41,9 +46,13 @@ jobs:
           TOKEN: ${{ secrets.WORKFLOWS_STACK_DEPLOY_KEY }}
         run: |
           if [ -n "$TOKEN" ]; then echo "present=true" >> "$GITHUB_OUTPUT"
-          else echo "::notice title=conformance skipped::WORKFLOWS_STACK_DEPLOY_KEY isn't set, so this job can't read ezgamehost/workflows-stack; the conformance harness didn't run."; fi
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            echo "::error title=conformance can't run::WORKFLOWS_STACK_DEPLOY_KEY isn't set, so this job can't read ezgamehost/workflows-stack. On main that's a failure, not a skip: restore the deploy key."; exit 1
+          else echo "::notice title=conformance skipped::WORKFLOWS_STACK_DEPLOY_KEY isn't available to this pull request; the conformance harness didn't run."; fi
       - if: steps.token.outputs.present == 'true'
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - if: steps.token.outputs.present == 'true'
         id: rev
         run: echo "sha=$(cat .workflows-stack-rev)" >> "$GITHUB_OUTPUT"
@@ -61,7 +70,7 @@ jobs:
           go-version-file: .workflows-stack/go.mod
           cache-dependency-path: .workflows-stack/go.sum
       - if: steps.token.outputs.present == 'true'
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.2
       - if: steps.token.outputs.present == 'true'
@@ -74,7 +83,7 @@ jobs:
 
   # End to end: this SDK against the real workflows-stack at .workflows-stack-rev (`workflows-stack
   # all`: api, live, engine, dispatch), on Postgres, Redis and an S3 fixture, with org-api faked by
-  # workflows-conformance fake-org-api (scripts/e2e.sh). Same secret and skip rules as conformance.
+  # workflows-conformance fake-org-api (scripts/e2e.sh). Same secret, failure and skip rules as conformance.
   e2e:
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
@@ -109,9 +118,13 @@ jobs:
           TOKEN: ${{ secrets.WORKFLOWS_STACK_DEPLOY_KEY }}
         run: |
           if [ -n "$TOKEN" ]; then echo "present=true" >> "$GITHUB_OUTPUT"
-          else echo "::notice title=e2e skipped::WORKFLOWS_STACK_DEPLOY_KEY isn't set, so this job can't read ezgamehost/workflows-stack; the end-to-end tests didn't run."; fi
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            echo "::error title=e2e can't run::WORKFLOWS_STACK_DEPLOY_KEY isn't set, so this job can't read ezgamehost/workflows-stack. On main that's a failure, not a skip: restore the deploy key."; exit 1
+          else echo "::notice title=e2e skipped::WORKFLOWS_STACK_DEPLOY_KEY isn't available to this pull request; the end-to-end tests didn't run."; fi
       - if: steps.token.outputs.present == 'true'
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - if: steps.token.outputs.present == 'true'
         id: rev
         run: echo "sha=$(cat .workflows-stack-rev)" >> "$GITHUB_OUTPUT"
@@ -129,7 +142,7 @@ jobs:
           go-version-file: .workflows-stack/go.mod
           cache-dependency-path: .workflows-stack/go.sum
       - if: steps.token.outputs.present == 'true'
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.2
       - if: steps.token.outputs.present == 'true'

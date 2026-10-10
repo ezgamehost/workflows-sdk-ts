@@ -15,7 +15,8 @@ createServer(async (req, res) => {
     method: req.method, headers,
     ...(hasBody ? { body: Readable.toWeb(req) as unknown as BodyInit, duplex: "half" } : {}),
   } as RequestInit))
+  // An unread (refused) body is dropped once the answer is out.
+  res.on("finish", () => { if (!req.readableEnded) req.destroy() })
   res.writeHead(response.status, Object.fromEntries(response.headers))
   res.end(Buffer.from(await response.arrayBuffer()))
-  if (!req.readableEnded) req.destroy() // an unread (refused) body
 }).listen(Number(process.env.PORT ?? 3000))

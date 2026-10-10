@@ -66,7 +66,8 @@ export function httpLive(base: string, token: string, fetchImpl: FetchLike = (u,
         last = `HTTP ${res.status}`
         wait = retryAfterMs(res)
       }
-      const delay = wait ?? Math.min(MAX_BACKOFF_MS, firstDelay * 2 ** attempt)
+      // Retry-After never shortens the backoff (a 0 or a past date mustn't spin).
+      const delay = Math.max(wait ?? 0, Math.min(MAX_BACKOFF_MS, firstDelay * 2 ** attempt))
       const more = opts.deadline === undefined ? attempt + 1 < (opts.attempts ?? 4) : opts.deadline - now() - delay > reserve
       if (!more) throw new CheckpointFailed(`workflows-live didn't take ${what}: ${last}`)
       await sleep(delay)

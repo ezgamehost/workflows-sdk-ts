@@ -5,19 +5,43 @@
   "license": "Apache-2.0",
   "type": "module",
   "sideEffects": false,
-  "repository": { "type": "git", "url": "https://github.com/ezgamehost/workflows-sdk-ts" },
-  "exports": {
-    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
-    "./protocol": { "types": "./dist/protocol/index.d.ts", "import": "./dist/protocol/index.js" }
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ezgamehost/workflows-sdk-ts"
   },
-  "files": ["dist", "LICENSE", "README.md"],
-  "engines": { "node": ">=20" },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol/public.d.ts",
+      "import": "./dist/protocol/public.js",
+      "default": "./dist/protocol/public.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "bun test",
     "smoke": "node scripts/smoke.mjs",
-    "check": "bun run typecheck && bun test && bun run build && bun run smoke && npm pack --dry-run"
+    "check": "bun run typecheck && bun test && bun run build && bun run smoke && npm pack --dry-run",
+    "prepack": "npm run build",
+    "types-compat": "scripts/types-compat.sh"
   },
   "devDependencies": {
     "@types/bun": "1.4.2",

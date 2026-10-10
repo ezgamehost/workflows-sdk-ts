@@ -7,7 +7,7 @@ import { Client } from "../src/client.ts"
 import { WorkflowError, encodeError } from "../src/runtime/errors.ts"
 import { execute } from "../src/runtime/execution.ts"
 import { CheckpointFailed, InvocationSuperseded, httpLive } from "../src/runtime/live.ts"
-import { workflow } from "../src/runtime/workflow.ts"
+import { definitionOf, workflow } from "../src/runtime/workflow.ts"
 import { serve } from "../src/serve.ts"
 import { FakeLive, entry, invocation, sid } from "./helpers.ts"
 
@@ -43,7 +43,7 @@ describe("error codes and sizes", () => {
 
 describe("retry policies and names", () => {
   test("workflow() merges a partial retry with the defaults", () => {
-    expect(workflow("w", async () => 1, { retry: { maxAttempts: 2 } }).opts.retry).toEqual({ ...DEFAULT_RETRY, maxAttempts: 2 })
+    expect(definitionOf(workflow("w", async () => 1, { retry: { maxAttempts: 2 } })).opts.retry).toEqual({ ...DEFAULT_RETRY, maxAttempts: 2 })
   })
   test("retry bounds are enforced when the workflow is defined", () => {
     for (const retry of [{ maxAttempts: 0 }, { maxAttempts: 101 }, { maxAttempts: 1.5 }, { maxMs: 86_400_001 }, { multiplier: 11 }, { multiplier: 0.5 }, { initialMs: -1 }])

@@ -61,6 +61,23 @@ const output = await client.output(run.id) // once completed
 await client.cancel(run.id)                // or client.retry(run.id) after a failure
 ```
 
+## The Client
+
+`new Client({ apiKey, organizationId, projectId, baseUrl?, retries?, maxRetryDelayMs? })` calls
+the Workflows API at `baseUrl`, by default `https://workflows-api.ezghcloud.com`. It retries 429
+and 503 answers after `Retry-After` (default 3 retries, at most 10 s apart) with the same
+`Idempotency-Key`, and throws `WorkflowsApiError` with the HTTP `status` and the platform `code`.
+
+| Methods | Credential |
+| --- | --- |
+| `start`, `get`, `cancel`, `retry`, `output`, `input`, `stepOutput`, `events` | an EZGH API key with the `workflows.runs.*` actions it uses, or an EZGH SSO token with the `workflows:runs` scope |
+| `createApp`, `getApp`, `sync`, `rotateSecret` | an EZGH API key with the `workflows.apps.*` actions it uses |
+
+`createApp` and `rotateSecret` return the signing secret once, so they aren't resent after a
+network error (a replay would answer `signingSecret: null`): they throw `WorkflowsApiError` with
+status 0 and code `outcome_unknown`. Check the app with `getApp`, and rotate its secret if you
+didn't receive one.
+
 ## Semantics
 
 - **Steps run at least once.** A step can run again if the process dies after it ran but before
@@ -71,20 +88,22 @@ await client.cancel(run.id)                // or client.retry(run.id) after a fa
   fail the step without retries. A result over 1 MiB fails the step too.
 - **Code between steps re-runs on every replay**, so keep it deterministic: read the time and
   random values through `step.now(name)` and `step.uuid(name)`.
-- **Step names identify steps.** A name is 1–256 bytes of UTF-8, and the *n*th call with a name
-  is that name's *n*th step. Two steps pending at the same time (in `Promise.all` or
-  `Promise.race`) need distinct names or distinct explicit `{ id }`s. Replays resolve recorded steps in the order they completed, so races take
+- **Step names identify steps.** A name is 1–256 bytes of UTF-8 without NUL, and the *n*th call
+  with a name is that name's *n*th step. Two steps pending at the same time (in `Promise.all` or
+  `Promise.race`) need distinct names or explicit `{ id }`s. An explicit id names one step for the
+  whole run: using it twice fails the run with `workflows.duplicate_step_name`. Replays resolve recorded steps in the order they completed, so races take
   the same branch every time.
 - **Retries:** a step that throws is retried with backoff (default 5 attempts, from 1 s doubling to
   at most 10 minutes; override per step with `{ retry }`, or per workflow; partial policies are
   merged with the defaults). Bounds: `maxAttempts` 1–100, `maxMs` up to 24 hours, `multiplier`
   1–10. Throw
-  `NonRetriableError` to fail at once, or `RetryAfterError(message, delayMs)` to pick the delay.
+  `NonRetriableError` to fail at once, or `RetryAfterError(message, delayMs)` to pick the delay (0 to 24 hours).
   On replay a recorded failure is rethrown as a `WorkflowError` (or the SDK class it was), with
   its `code`, `name`, `data` and `cause`. Error codes on the wire are `user` or `workflows.*`: a
   `WorkflowError` with another code is sent as `user`, its code kept as the name and in
   `data.code`. Messages and stacks are cut to 8 KiB, and `data` over 64 KiB is dropped.
-- **Timeouts:** with `{ timeoutMs }` a step that runs too long fails with
+- **Timeouts:** with `{ timeoutMs }` (at most 900,000: a step can't outlive an invocation) a step
+  that runs too long fails with
   `workflows.step_timeout` (retryable). The step function gets `{ signal, attempt,
   idempotencyKey }`; `signal` aborts at the timeout, so pass it to `fetch`.
 - **Invocation time:** an invocation stops starting steps when less than max(5 s, 10 %) of its
@@ -95,8 +114,10 @@ await client.cancel(run.id)                // or client.retry(run.id) after a fa
   waiting on. `finally` and `catch` blocks can still run `step.run` cleanup steps; sleeps and
   new values are refused. The run then ends `cancelled`.
 
-The package has no runtime dependencies: it uses Web Crypto and `fetch` only. The wire protocol
-codec and signature helpers are also exported as `@ezgh/workflows/protocol`.
+The package has no runtime dependencies: it uses Web Crypto and `fetch` only. It's ESM only; in
+TypeScript use `moduleResolution` `bundler`, `node16` or `nodenext` (TypeScript 5.4 or later).
+`@ezgh/workflows/protocol` exports `sign`, `verify`, `decodeSecret`, `SignatureError` and the wire
+types, for checking `EZGH-Signature` headers in a custom transport.
 
 ## Development
 

@@ -14,7 +14,7 @@ export class SignatureError extends Error {
 const malformedSecret = "A signing secret is whsec_ and 43 base64url characters, as the API returned it"
 
 // decodeSecret: "whsec_" + 43 base64url characters → the 32 HMAC key bytes (D22).
-export function decodeSecret(secret: string): Uint8Array<ArrayBuffer> {
+export function decodeSecret(secret: string): Uint8Array {
   const s = typeof secret === "string" ? secret.trim() : ""
   if (!s.startsWith(SECRET_PREFIX) || s.length !== SECRET_PREFIX.length + 43) throw new TypeError(malformedSecret)
   let b: Uint8Array<ArrayBuffer>

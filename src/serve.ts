@@ -4,7 +4,7 @@ import { detectDeployment } from "./env.ts"
 import { execute } from "./runtime/execution.ts"
 import { InvalidInvocation, parseInvocation } from "./runtime/invocation.ts"
 import { CheckpointFailed, InvocationSuperseded, httpLive, type FetchLike } from "./runtime/live.ts"
-import type { Workflow } from "./runtime/workflow.ts"
+import { definitionOf, type Workflow, type WorkflowDefinition } from "./runtime/workflow.ts"
 import { SDK_NAME, SDK_VERSION } from "./version.ts"
 
 const MAX_BODY = 8 * 1024 * 1024
@@ -53,13 +53,15 @@ async function readBody(req: Request): Promise<Uint8Array> {
 // (plan D25): 200 SyncReply or InvocationResult, 401 bad signature, 400 bad invocation, 409
 // superseded, 503 checkpoint failed, 500 SDK error, 405 non-POST, 413 over 8 MiB.
 export function serve(opts: ServeOptions): (req: Request) => Promise<Response> {
-  const byName = new Map<string, Workflow<any, any>>()
-  for (const w of opts.workflows) {
-    if (byName.has(w.name)) throw new TypeError(`Two workflows are named "${w.name}"`)
-    byName.set(w.name, w)
+  const byName = new Map<string, { wf: Workflow<any, any>; def: WorkflowDefinition }>()
+  for (const wf of opts.workflows) {
+    const def = definitionOf(wf)
+    if (byName.has(def.name)) throw new TypeError(`Two workflows are named "${def.name}"`)
+    byName.set(def.name, { wf, def })
   }
   if (!Array.isArray(opts.signingSecrets) || opts.signingSecrets.length === 0) throw new TypeError("serve() needs at least one signing secret")
-  for (const s of opts.signingSecrets) if (s !== undefined) decodeSecret(s) // a malformed secret fails now
+  // A malformed secret fails now; an unset or empty one (an env var at build time) is skipped.
+  for (const s of opts.signingSecrets) if (s !== undefined && s !== "") decodeSecret(s)
   let secrets: Uint8Array[] | undefined
   const keys = () => (secrets ??= opts.signingSecrets.filter((s): s is string => typeof s === "string" && s !== "").map(decodeSecret))
   if (opts.maxStepsPerInvocation !== undefined && (!Number.isInteger(opts.maxStepsPerInvocation) || opts.maxStepsPerInvocation < 1))
@@ -100,16 +102,17 @@ export function serve(opts: ServeOptions): (req: Request) => Promise<Response> {
     if (inv.kind === "sync") {
       const reply: SyncReply = {
         protocolVersions: [PROTOCOL_VERSION], sdk, maxInvocationSeconds: maxSeconds,
-        workflows: [...byName.values()].map((w) => ({ name: w.name, ...(w.opts.retry ? { retry: w.opts.retry } : {}), ...(w.opts.timeoutMs ? { timeoutMs: w.opts.timeoutMs } : {}) })),
+        workflows: [...byName.values()].map(({ def }) => ({ name: def.name, ...(def.opts.retry ? { retry: def.opts.retry } : {}), ...(def.opts.timeoutMs ? { timeoutMs: def.opts.timeoutMs } : {}) })),
         ...(deployment ? { deployment } : {}),
       }
       return json(200, reply)
     }
     const result = (commands: InvocationResult["commands"]): InvocationResult => ({ commands, ...(deployment ? { deployment } : {}), sdk })
-    const wf = byName.get(inv.run!.workflow)
+    const wf = byName.get(inv.run!.workflow)?.wf
     if (!wf) return json(200, result([{ type: "workflowNotFound", workflow: inv.run!.workflow }]))
-    // The deadline on this machine's clock: the engine's budget (deadline − t), from receipt.
-    const deadline = receivedAt + (Date.parse(inv.deadline) - sig.t * 1000)
+    // The deadline on this machine's clock: the engine's budget (deadline − t) from receipt, and
+    // never later than the deadline as this clock reads it.
+    const deadline = Math.min(receivedAt + (Date.parse(inv.deadline) - sig.t * 1000), Date.parse(inv.deadline))
     const total = Math.max(0, deadline - receivedAt)
     const reserveMs = Math.max(5000, total * 0.1)
     try {

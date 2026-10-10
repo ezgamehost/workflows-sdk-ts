@@ -1,12 +1,19 @@
 import type { RetryPolicy } from "../protocol/index.ts"
 
 // Jsonify<T> is T after a JSON round trip: what a step's result is, live and on replay.
+// Object fields that may be undefined become optional (JSON drops them); undefined in arrays
+// becomes null.
 export type Jsonify<T> =
   T extends Date ? string
   : T extends undefined ? null
   : T extends (infer U)[] ? Jsonify<U>[]
-  : T extends object ? { [K in keyof T]: Jsonify<T[K]> }
+  : T extends object ? JsonifyObject<T>
   : T
+type JsonifyObject<T> = Flatten<
+  { [K in keyof T as undefined extends T[K] ? K : never]?: Jsonify<Exclude<T[K], undefined>> } &
+  { [K in keyof T as undefined extends T[K] ? never : K]: Jsonify<T[K]> }
+>
+type Flatten<T> = { [K in keyof T]: T[K] }
 export interface StepRunOptions { retry?: Partial<RetryPolicy>; timeoutMs?: number; id?: string }
 // What a step function is called with: signal aborts when the step passes its timeoutMs.
 export interface StepRunContext { signal: AbortSignal; attempt: number; idempotencyKey: string }

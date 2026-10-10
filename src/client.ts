@@ -1,7 +1,8 @@
 import type { RetryPolicy, SDKInfo, WireError } from "./protocol/index.ts"
 import type { FetchLike } from "./runtime/live.ts"
 
-export type RunStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled" | "timedOut"
+// Open unions: a later API may add values, so handle the unknown case.
+export type RunStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled" | "timedOut" | (string & {})
 export interface RunStep {
   seq: number; stepId: string; name: string; kind: string; status: string; attempt: number; hasOutput: boolean
   error: WireError | null
@@ -18,7 +19,7 @@ export interface RunEvent {
 export interface AppWorkflow { name: string; retry?: RetryPolicy; timeoutMs?: number }
 export interface App {
   id: string; slug: string; resourceName: string; organizationId: string; projectId: string
-  name: string; kind: "push" | "pull"; endpoint: string | null
+  name: string; kind: "push" | "pull" | (string & {}); endpoint: string | null
   syncStatus: "unsynced" | "synced" | "failed" | (string & {})
   workflows: AppWorkflow[]; maxInvocationSeconds: number | null; protocolVersion: string | null
   sdk: SDKInfo | null; deployment: string | null; health: string; lastSyncAt: string | null
@@ -27,7 +28,9 @@ export interface App {
 // A new or rotated signing secret is returned once; an Idempotency-Key replay answers null.
 export interface AppWithSecret { app: App; signingSecret: string | null }
 
-// An error answer from the Workflows API: the HTTP status and the platform error code.
+// An error answer from the Workflows API: the HTTP status and the platform error code. Status 0
+// with code "outcome_unknown": the request may or may not have taken effect (a network error on
+// createApp or rotateSecret, which aren't resent; see there).
 export class WorkflowsApiError extends Error {
   override name = "WorkflowsApiError"
   constructor(readonly status: number, readonly code: string, message: string, readonly retryAfterSeconds?: number) { super(message) }
@@ -64,9 +67,13 @@ export class Client {
     this.#fetch = opts.fetch ?? ((u, i) => fetch(u, i))
     this.#retries = opts.retries ?? 3
     this.#maxDelay = opts.maxRetryDelayMs ?? 10_000
+    if (!Number.isInteger(this.#retries) || this.#retries < 0) throw new TypeError("retries is a whole number ≥ 0")
+    if (!Number.isFinite(this.#maxDelay) || this.#maxDelay < 0) throw new TypeError("maxRetryDelayMs is a number ≥ 0")
   }
 
-  private async call<T>(method: string, path: string, body?: unknown, idempotencyKey?: string): Promise<T> {
+  // call sends one request, retrying 429, 503 and (unless resendOnNetworkError is false) network
+  // errors with the same Idempotency-Key.
+  private async call<T>(method: string, path: string, body?: unknown, idempotencyKey?: string, resendOnNetworkError = true): Promise<T> {
     const headers: Record<string, string> = { Authorization: `Bearer ${this.#apiKey}`, Accept: "application/json" }
     if (body !== undefined) headers["Content-Type"] = "application/json"
     if (method !== "GET") headers["Idempotency-Key"] = idempotencyKey ?? crypto.randomUUID()
@@ -77,6 +84,8 @@ export class Client {
       try {
         res = await this.#fetch(this.#base + path, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) })
       } catch (e) {
+        if (!resendOnNetworkError)
+          throw new WorkflowsApiError(0, "outcome_unknown", `The request failed in transit (${e instanceof Error ? e.message : String(e)}), so it may have taken effect: a resend would return no secret. Check with getApp, and rotate the app's secret if you didn't receive it.`)
         if (attempt >= retries) throw e
         await sleep(Math.min(maxDelay, 500 * 2 ** attempt))
         continue
@@ -94,8 +103,10 @@ export class Client {
   }
 
   // Apps
+  // createApp returns the app and its signing secret, once. A network error isn't resent (the
+  // replay of a created app answers signingSecret: null): it throws outcome_unknown.
   createApp(name: string, opts: { endpoint?: string; idempotencyKey?: string } = {}): Promise<AppWithSecret> {
-    return this.call("POST", "/apps", { name, kind: "push", ...(opts.endpoint ? { endpoint: opts.endpoint } : {}) }, opts.idempotencyKey)
+    return this.call("POST", "/apps", { name, kind: "push", ...(opts.endpoint ? { endpoint: opts.endpoint } : {}) }, opts.idempotencyKey, false)
   }
   getApp(appId: string): Promise<App> { return this.call("GET", `/apps/${id(appId)}`) }
   // sync asks EZGH to call the app's endpoint and record its workflows; run it after each deploy.
@@ -104,7 +115,8 @@ export class Client {
     return this.call("POST", `/apps/${id(appId)}/sync`, opts)
   }
   // rotateSecret returns a new signing secret; the old ones stay valid for 24 hours.
-  rotateSecret(appId: string): Promise<AppWithSecret> { return this.call("POST", `/apps/${id(appId)}/rotate-secret`, {}) }
+  // A network error isn't resent, as for createApp (outcome_unknown).
+  rotateSecret(appId: string): Promise<AppWithSecret> { return this.call("POST", `/apps/${id(appId)}/rotate-secret`, {}, undefined, false) }
 
   // Runs
   // start a run: 201 for a new run. With runKey, starting again with the same workflow and input
