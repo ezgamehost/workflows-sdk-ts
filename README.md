@@ -100,6 +100,14 @@ checkout>` builds workflows-stack's harness and runs its scenarios against it; C
 at `.workflows-stack-rev` (it reads the internal workflows-stack repo with the
 `WORKFLOWS_STACK_READ_TOKEN` secret and skips with a notice without it).
 
+`scripts/e2e.sh <workflows-stack checkout>` runs the SDK end to end against the real
+workflows-stack (`workflows-stack all` on Postgres and an S3 fixture, with a fake org-api):
+completion, idempotent start, sleep and payload replay, step retries, a process killed mid-step,
+cancel with cleanup, and retry from failure. The CI job `e2e` runs it with the same secret rule.
+
+Verified end to end against workflows-stack 59d8066 (`scripts/e2e.sh`, run against the shared test
+fixtures; CI job e2e, which runs once `WORKFLOWS_STACK_READ_TOKEN` exists).
+
 `test/vectors` is a verbatim copy of workflows-stack's `protocol/vectors` at the commit in
 `.workflows-stack-rev`; refresh it with `scripts/sync-vectors.sh <workflows-stack checkout> [<commit>]`.
 

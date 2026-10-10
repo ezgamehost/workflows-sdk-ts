@@ -1,20 +1,36 @@
+import type { RetryPolicy, SDKInfo, WireError } from "./protocol/index.ts"
 import type { FetchLike } from "./runtime/live.ts"
 
-export interface WireErrorSummary { code: string; name: string; message: string }
-export interface RunStep { seq: number; stepId: string; name: string; kind: string; status: string; attempt: number; hasOutput: boolean; error?: WireErrorSummary | null }
-export interface Run {
-  id: string; runKey?: string | null; appId: string; workflow: string
-  status: "running" | "cancelling" | "completed" | "failed" | "cancelled" | "timedOut"
-  attempt: number; createdAt: string; updatedAt: string; endedAt?: string | null
-  error?: WireErrorSummary | null; causeStepId?: string | null
-  steps?: RunStep[]
+export type RunStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled" | "timedOut"
+export interface RunStep {
+  seq: number; stepId: string; name: string; kind: string; status: string; attempt: number; hasOutput: boolean
+  error: WireError | null
 }
-export interface App { id: string; name: string; kind: "push" | "pull"; endpoint?: string | null; syncStatus: string; workflows: { name: string }[] }
+export interface Run {
+  id: string; runKey: string | null; appId: string; workflow: string; status: RunStatus; attempt: number
+  error: WireError | null; causeStepId: string | null
+  steps: RunStep[]
+  createdAt: string; updatedAt: string; endedAt: string | null
+}
+export interface RunEvent {
+  id: string; at: string; type: string; stepId: string | null; invocationId: string | null; deployment: string | null; detail: unknown
+}
+export interface AppWorkflow { name: string; retry?: RetryPolicy; timeoutMs?: number }
+export interface App {
+  id: string; slug: string; resourceName: string; organizationId: string; projectId: string
+  name: string; kind: "push" | "pull"; endpoint: string | null
+  syncStatus: "unsynced" | "synced" | "failed" | (string & {})
+  workflows: AppWorkflow[]; maxInvocationSeconds: number | null; protocolVersion: string | null
+  sdk: SDKInfo | null; deployment: string | null; health: string; lastSyncAt: string | null
+  createdAt: string; updatedAt: string
+}
+// A new or rotated signing secret is returned once; an Idempotency-Key replay answers null.
+export interface AppWithSecret { app: App; signingSecret: string | null }
 
 // An error answer from the Workflows API: the HTTP status and the platform error code.
 export class WorkflowsApiError extends Error {
   override name = "WorkflowsApiError"
-  constructor(readonly status: number, readonly code: string, message: string) { super(message) }
+  constructor(readonly status: number, readonly code: string, message: string, readonly retryAfterSeconds?: number) { super(message) }
 }
 
 export interface ClientOptions {
@@ -24,45 +40,87 @@ export interface ClientOptions {
   projectId: string
   baseUrl?: string
   fetch?: FetchLike
+  // How many times a 429, 503 or network error is retried (default 3), after Retry-After (at
+  // most maxRetryDelayMs, default 10 s). Writes are resent with the same Idempotency-Key.
+  retries?: number
+  maxRetryDelayMs?: number
 }
 
-// Client calls the Workflows API for one project: start, inspect, cancel and retry runs, read a
-// run's output, and sync an app after a deploy.
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+const id = encodeURIComponent
+
+// Client calls the Workflows API for one project: apps (create, sync, rotate the secret) and runs
+// (start, inspect, cancel, retry, payloads, events).
 export class Client {
   private base: string
   private f: FetchLike
   constructor(private opts: ClientOptions) {
-    this.base = `${(opts.baseUrl ?? "https://workflows-api.ezghcloud.com").replace(/\/+$/, "")}/v1/organizations/${encodeURIComponent(opts.organizationId)}/projects/${encodeURIComponent(opts.projectId)}`
+    this.base = `${(opts.baseUrl ?? "https://workflows-api.ezghcloud.com").replace(/\/+$/, "")}/v1/organizations/${id(opts.organizationId)}/projects/${id(opts.projectId)}`
     this.f = opts.fetch ?? ((u, i) => fetch(u, i))
   }
 
   private async call<T>(method: string, path: string, body?: unknown, idempotencyKey?: string): Promise<T> {
     const headers: Record<string, string> = { Authorization: `Bearer ${this.opts.apiKey}`, Accept: "application/json" }
     if (body !== undefined) headers["Content-Type"] = "application/json"
-    if (method === "POST") headers["Idempotency-Key"] = idempotencyKey ?? crypto.randomUUID()
-    const res = await this.f(this.base + path, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) })
-    const text = await res.text()
-    let data: unknown
-    try { data = text ? JSON.parse(text) : undefined } catch { data = undefined }
-    if (!res.ok) {
+    if (method !== "GET") headers["Idempotency-Key"] = idempotencyKey ?? crypto.randomUUID()
+    const retries = this.opts.retries ?? 3
+    const maxDelay = this.opts.maxRetryDelayMs ?? 10_000
+    for (let attempt = 0; ; attempt++) {
+      let res: Response
+      try {
+        res = await this.f(this.base + path, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) })
+      } catch (e) {
+        if (attempt >= retries) throw e
+        await sleep(Math.min(maxDelay, 500 * 2 ** attempt))
+        continue
+      }
+      const text = await res.text()
+      let data: unknown
+      try { data = text ? JSON.parse(text) : undefined } catch { data = undefined }
+      if (res.ok) return data as T
       const e = (data as { error?: { code?: string; message?: string } } | undefined)?.error
-      throw new WorkflowsApiError(res.status, e?.code ?? "unknown", e?.message ?? `HTTP ${res.status}`)
+      const ra = Number(res.headers.get("Retry-After"))
+      const err = new WorkflowsApiError(res.status, e?.code ?? "unknown", e?.message ?? `HTTP ${res.status}`, Number.isFinite(ra) && ra > 0 ? ra : undefined)
+      if ((res.status !== 429 && res.status !== 503) || attempt >= retries) throw err
+      await sleep(Math.min(maxDelay, (err.retryAfterSeconds ?? 1) * 1000))
     }
-    return data as T
   }
 
-  // start a run. With runKey, starting again with the same input returns the same run (200), and
-  // different input is a 409 run_key_conflict.
+  // Apps
+  createApp(name: string, opts: { endpoint?: string; idempotencyKey?: string } = {}): Promise<AppWithSecret> {
+    return this.call("POST", "/apps", { name, kind: "push", ...(opts.endpoint ? { endpoint: opts.endpoint } : {}) }, opts.idempotencyKey)
+  }
+  getApp(appId: string): Promise<App> { return this.call("GET", `/apps/${id(appId)}`) }
+  // sync asks EZGH to call the app's endpoint and record its workflows; run it after each deploy.
+  // A failed sync is a 409 sync_failed.
+  sync(appId: string, opts: { endpoint?: string; deployment?: string } = {}): Promise<App> {
+    return this.call("POST", `/apps/${id(appId)}/sync`, opts)
+  }
+  // rotateSecret returns a new signing secret; the old ones stay valid for 24 hours.
+  rotateSecret(appId: string): Promise<AppWithSecret> { return this.call("POST", `/apps/${id(appId)}/rotate-secret`, {}) }
+
+  // Runs
+  // start a run: 201 for a new run. With runKey, starting again with the same workflow and input
+  // returns the same run, and different input is a 409 run_key_conflict.
   start(appId: string, workflow: string, input?: unknown, opts: { runKey?: string; idempotencyKey?: string } = {}): Promise<Run> {
     return this.call("POST", "/runs", { appId, workflow, ...(input !== undefined ? { input } : {}), ...(opts.runKey ? { runKey: opts.runKey } : {}) }, opts.idempotencyKey)
   }
-  get(runId: string): Promise<Run> { return this.call("GET", `/runs/${encodeURIComponent(runId)}`) }
-  cancel(runId: string): Promise<Run> { return this.call("POST", `/runs/${encodeURIComponent(runId)}/cancel`, {}) }
-  retry(runId: string): Promise<Run> { return this.call("POST", `/runs/${encodeURIComponent(runId)}/retry`, {}) }
-  // The run's output (needs workflows.runs.getPayload); an error until the run completes.
-  output(runId: string): Promise<unknown> { return this.call("GET", `/runs/${encodeURIComponent(runId)}/payloads/output`) }
-  // sync asks EZGH to call the app's endpoint and record its workflows; run it after each deploy.
-  sync(appId: string, opts: { endpoint?: string; deployment?: string } = {}): Promise<App> {
-    return this.call("POST", `/apps/${encodeURIComponent(appId)}/sync`, opts)
+  get(runId: string): Promise<Run> { return this.call("GET", `/runs/${id(runId)}`) }
+  // cancel: the run is cancelling; its code gets gracePeriodSeconds (0–3600, default 300) to clean up.
+  cancel(runId: string, opts: { gracePeriodSeconds?: number } = {}): Promise<Run> {
+    return this.call("POST", `/runs/${id(runId)}/cancel`, opts.gracePeriodSeconds === undefined ? {} : { gracePeriodSeconds: opts.gracePeriodSeconds })
+  }
+  // retry a failed run from its failed step; completed steps aren't run again.
+  retry(runId: string): Promise<Run> { return this.call("POST", `/runs/${id(runId)}/retry`, {}) }
+  // The run's output (workflows.runs.getPayload); 409 run_not_completed until it completes.
+  output(runId: string): Promise<unknown> { return this.call("GET", `/runs/${id(runId)}/payloads/output`) }
+  input(runId: string): Promise<unknown> { return this.call("GET", `/runs/${id(runId)}/payloads/input`) }
+  stepOutput(runId: string, stepId: string): Promise<unknown> { return this.call("GET", `/runs/${id(runId)}/steps/${id(stepId)}/output`) }
+  events(runId: string, opts: { cursor?: string; limit?: number } = {}): Promise<{ events: RunEvent[]; nextCursor: string | null }> {
+    const q = new URLSearchParams()
+    if (opts.cursor) q.set("cursor", opts.cursor)
+    if (opts.limit !== undefined) q.set("limit", String(opts.limit))
+    const qs = q.toString()
+    return this.call("GET", `/runs/${id(runId)}/events${qs ? `?${qs}` : ""}`)
   }
 }

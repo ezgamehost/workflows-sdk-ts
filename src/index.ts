@@ -7,5 +7,5 @@ export { NonRetriableError, RetryAfterError, CancelledError, WorkflowError } fro
 export { serve } from "./serve.ts"
 export type { ServeOptions } from "./serve.ts"
 export { Client, WorkflowsApiError } from "./client.ts"
-export type { App, ClientOptions, Run, RunStep } from "./client.ts"
+export type { App, AppWithSecret, AppWorkflow, ClientOptions, Run, RunEvent, RunStatus, RunStep } from "./client.ts"
 export type { FetchLike } from "./runtime/live.ts"
