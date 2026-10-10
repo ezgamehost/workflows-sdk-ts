@@ -1,2 +1,6 @@
 export * as protocol from "./protocol/index.ts"
 export { SDK_NAME, SDK_VERSION } from "./version.ts"
+export { workflow } from "./runtime/workflow.ts"
+export type { Workflow, WorkflowOptions } from "./runtime/workflow.ts"
+export type { WorkflowContext, Step, StepRunOptions, Jsonify } from "./runtime/context.ts"
+export { NonRetriableError, RetryAfterError, CancelledError, WorkflowError } from "./runtime/errors.ts"

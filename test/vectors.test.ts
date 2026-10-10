@@ -11,19 +11,9 @@ import unknownFields from "./vectors/unknown-fields.json"
 import { backoff, decodeSecret, encodeValue, isInvocationToken, shardOf, sign, SignatureError, stepId, verify } from "../src/protocol/index.ts"
 import { decodeError, encodeError } from "../src/runtime/errors.ts"
 import { InvalidInvocation, parseInvocation } from "../src/runtime/invocation.ts"
+import { codecValues } from "./helpers.ts"
 
 const utf8 = (s: string) => new TextEncoder().encode(s)
-
-// codec.json names JS values by tag; these are the values.
-export const codecValues: Record<string, unknown> = {
-  "date-epoch": new Date(0),
-  undefined: undefined,
-  "object-with-undefined-field": { gone: undefined },
-  "array-with-undefined": [1, undefined],
-  "nested-date": { at: new Date("2026-10-09T12:00:00.000Z") },
-  bigint: 1n,
-  function: () => 1,
-}
 
 describe("workflows-stack protocol vectors", () => {
   test("step IDs", async () => {
