@@ -13,7 +13,7 @@ export function mintCallbackToken(shard: number, random: (n: number) => Uint8Arr
 }
 
 // parseCallbackToken parses the wire form strictly (lowercase hex, canonical base64url).
-export function parseCallbackToken(token: string): { shard: number; secret: Uint8Array<ArrayBuffer> } {
+export function parseCallbackToken(token: string): { shard: number; secret: Uint8Array } {
   const m = typeof token === "string" ? TOKEN.exec(token) : null
   if (!m) throw new TypeError("Not a callback token")
   const shard = parseInt(m[1]!, 16)
@@ -26,5 +26,5 @@ export function parseCallbackToken(token: string): { shard: number; secret: Uint
 // callbackTokenHash: lowercase hex SHA-256 of the token's secret (what the engine stores).
 export async function callbackTokenHash(token: string): Promise<string> {
   const { secret } = parseCallbackToken(token)
-  return toHex(new Uint8Array(await crypto.subtle.digest("SHA-256", secret)))
+  return toHex(new Uint8Array(await crypto.subtle.digest("SHA-256", secret as Uint8Array<ArrayBuffer>)))
 }
