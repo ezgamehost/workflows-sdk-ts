@@ -61,6 +61,63 @@ const output = await client.output(run.id) // once completed
 await client.cancel(run.id)                // or client.retry(run.id) after a failure
 ```
 
+## Parallel steps
+
+Steps started together run in parallel: `Promise.all` and `Promise.race` over `step.run` calls
+(and sleeps, callbacks and child workflows) hand every step to EZGH at once, and each runs in its
+own invocation, retried on its own.
+
+```ts
+const sizes = await Promise.all(urls.map((url, i) => step.run(`size-${i}`, () => fetchSize(url))))
+const first = await Promise.race([step.run("work", doWork), step.sleep("limit", "10m").then(() => "timed out")])
+```
+
+A run has at most 32 step invocations at once; further steps wait their turn. Steps pending
+together need distinct names (or `{ id }`s). Replays resolve steps in the order they completed,
+so a race takes the same branch every time. A step's `signal` also aborts when the run is
+cancelling (pull workers learn it from their heartbeats).
+
+## Callbacks
+
+`step.createCallback(name, { timeoutMs })` creates a callback (default timeout 7 days, from 1 s to
+a year). Its `url` is `https://workflows-api.ezghcloud.com/public/v1/callbacks/<token>`: give it
+to whoever completes the callback (a webhook, an approval email). `wait()` suspends the run until
+someone POSTs a JSON body (at most 1 MiB) to the URL, and resolves with that body:
+
+```ts
+const cb = await step.createCallback<{ approved: boolean }>("approval", { timeoutMs: 3 * 86_400_000 })
+await step.run("ask", () => email.send(manager, `Approve? POST to ${cb.url}`))
+try {
+  const { approved } = await cb.wait()
+} catch (e) {
+  if (e instanceof CallbackTimeout) { /* nobody answered in time */ }
+}
+```
+
+The first completion wins; repeating it with the same body succeeds, a different body is a `409
+callback_completed`, and a completion after the timeout is a `410 callback_expired`. An
+authenticated caller can complete it with `POST …/runs/:runId/callbacks/:stepId` instead
+(`workflows.callbacks.complete`). The token is the URL's only credential: keep it private. The
+URL is recorded before your code sees it, so replays rebuild the same one.
+
+## Child workflows
+
+`step.invoke(name, { workflow, input })` starts a run of another workflow in the same app and
+waits for it, resolving with its output. A failed child rejects with `ChildFailed` (code
+`workflows.child_failed`), whose `cause` is the child's own error. The child's run ID is derived
+from the parent's and the step's, so it starts exactly once. Children nest at most 10 deep, and
+each counts as one of its parent's steps.
+
+```ts
+const report = await step.invoke("report", { workflow: buildReport, input: { month: "2026-10" } })
+```
+
+A run a schedule started sees `run.schedule` (`{ id, scheduledTime }`, the cron instant).
+
+Parallel steps, callbacks and child workflows need a workflows-stack serving protocol 1.1. An
+invocation at protocol 1.0 runs steps one after another, and `createCallback` and `invoke` fail
+the run with `NonRetriableError`.
+
 ## The Client
 
 `new Client({ apiKey, organizationId, projectId, baseUrl?, retries?, maxRetryDelayMs? })` calls

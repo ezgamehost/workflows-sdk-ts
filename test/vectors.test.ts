@@ -12,6 +12,10 @@ import { backoff, decodeSecret, encodeValue, isInvocationToken, shardOf, sign, S
 import { decodeError, encodeError } from "../src/runtime/errors.ts"
 import { InvalidInvocation, parseInvocation } from "../src/runtime/invocation.ts"
 import { codecValues } from "./helpers.ts"
+import callbackTokens from "./vectors/callback-tokens.json"
+import derivedIds from "./vectors/derived-ids.json"
+import { callbackTokenHash, mintCallbackToken, parseCallbackToken } from "../src/protocol/callback.ts"
+import { childRunId, rfc3339Nano, scheduledRunId, triggeredRunId } from "../src/protocol/derived.ts"
 
 const utf8 = (s: string) => new TextEncoder().encode(s)
 
@@ -62,5 +66,26 @@ describe("workflows-stack protocol vectors", () => {
   })
   test("invalid invocations are refused", () => {
     for (const inv of messages.invocation.invalid) expect(() => parseInvocation(JSON.stringify(inv))).toThrow(InvalidInvocation)
+  })
+  test("callback-tokens.json: parse, shard, hash and mint", async () => {
+    for (const c of callbackTokens.valid) {
+      expect([c.token, parseCallbackToken(c.token).shard]).toEqual([c.token, c.shard])
+      expect([c.token, await callbackTokenHash(c.token)]).toEqual([c.token, c.hashHex])
+      const secret = new Uint8Array(c.secretHex.match(/../g)!.map((h) => parseInt(h, 16)))
+      expect(mintCallbackToken(c.shard, () => secret)).toBe(c.token)
+    }
+    for (const c of callbackTokens.invalid) expect([c.token, c.why, (() => { try { parseCallbackToken(c.token); return "parsed" } catch { return "refused" } })()]).toEqual([c.token, c.why, "refused"])
+  })
+  test("derived-ids.json: child, scheduled and triggered run IDs carry their shard", async () => {
+    for (const c of derivedIds.child) expect([c.parent, c.stepId, await childRunId(c.parent, c.stepId), shardOf(c.id)]).toEqual([c.parent, c.stepId, c.id, c.shard])
+    for (const c of derivedIds.scheduled) expect([c.scheduleId, c.scheduledTime, await scheduledRunId(c.scheduleId, c.scheduledTime), shardOf(c.id)]).toEqual([c.scheduleId, c.scheduledTime, c.id, c.shard])
+    for (const c of derivedIds.scheduled) expect(await scheduledRunId(c.scheduleId, new Date(c.scheduledTime))).toBe(c.id)
+    for (const c of derivedIds.triggered) expect([c.scheduleId, c.idempotencyKey, await triggeredRunId(c.scheduleId, c.idempotencyKey), shardOf(c.id)]).toEqual([c.scheduleId, c.idempotencyKey, c.id, c.shard])
+  })
+  test("rfc3339Nano trims like Go and converts to UTC", () => {
+    expect(rfc3339Nano("2026-10-10T00:00:00.000Z")).toBe("2026-10-10T00:00:00Z")
+    expect(rfc3339Nano("2026-10-10T00:00:00.120Z")).toBe("2026-10-10T00:00:00.12Z")
+    expect(rfc3339Nano("2026-10-10T02:00:00.123456789+02:00")).toBe("2026-10-10T00:00:00.123456789Z")
+    expect(rfc3339Nano(new Date("2026-10-10T00:00:01.500Z"))).toBe("2026-10-10T00:00:01.5Z")
   })
 })

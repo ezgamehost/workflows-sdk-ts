@@ -305,13 +305,13 @@ describe("errors", () => {
     expect(w).toMatchObject({ code: "user", name: "HttpError", message: "outer", data: { status: 503 }, cause: { code: "user", name: "Error", message: "inner" } })
     expect((w.stack ?? "").length).toBeLessThanOrEqual(8192)
   })
-  test("cause chains stop at depth 8", () => {
+  test("cause chains stop at 8 levels: the error and 7 causes", () => {
     let e: Error = new Error("0")
     for (let i = 1; i < 20; i++) e = new Error(String(i), { cause: e })
     let w = encodeError(e)
     let depth = 0
     while (w.cause) { w = w.cause; depth++ }
-    expect(depth).toBe(8)
+    expect(depth).toBe(7)
   })
   test("thrown non-Errors are user errors", () => {
     expect(encodeError("plain")).toEqual({ code: "user", name: "Error", message: "plain" })

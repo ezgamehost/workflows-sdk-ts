@@ -1,5 +1,5 @@
 import type { InvocationResult, SyncReply } from "./protocol/index.ts"
-import { PROTOCOL_VERSION, SIGNATURE_HEADER, SignatureError, decodeSecret, parseSignature, verifyParsed } from "./protocol/index.ts"
+import { PROTOCOL_VERSIONS, SIGNATURE_HEADER, SignatureError, decodeSecret, parseSignature, verifyParsed } from "./protocol/index.ts"
 import { detectDeployment } from "./env.ts"
 import { execute } from "./runtime/execution.ts"
 import { InvalidInvocation, parseInvocation } from "./runtime/invocation.ts"
@@ -24,6 +24,9 @@ export interface ServeOptions {
   fetch?: FetchLike
   // Steps run per invocation before it ends and EZGH invokes the workflow again (default 50).
   maxStepsPerInvocation?: number
+  // The public API base for callback URLs (default https://workflows-api.ezghcloud.com); used only
+  // when an invocation doesn't carry endpoints.api.
+  apiBaseUrl?: string
 }
 
 class TooLarge extends Error {}
@@ -101,7 +104,7 @@ export function serve(opts: ServeOptions): (req: Request) => Promise<Response> {
     }
     if (inv.kind === "sync") {
       const reply: SyncReply = {
-        protocolVersions: [PROTOCOL_VERSION], sdk, maxInvocationSeconds: maxSeconds,
+        protocolVersions: [...PROTOCOL_VERSIONS], sdk, maxInvocationSeconds: maxSeconds,
         workflows: [...byName.values()].map(({ def }) => ({ name: def.name, ...(def.opts.retry ? { retry: def.opts.retry } : {}), ...(def.opts.timeoutMs ? { timeoutMs: def.opts.timeoutMs } : {}) })),
         ...(deployment ? { deployment } : {}),
       }
@@ -117,7 +120,7 @@ export function serve(opts: ServeOptions): (req: Request) => Promise<Response> {
     const reserveMs = Math.max(5000, total * 0.1)
     try {
       const io = httpLive(inv.endpoints.live, inv.token, fetchImpl, { deadline, reserveMs })
-      return json(200, result(await execute(inv, wf, io, { deadline, ...(opts.maxStepsPerInvocation ? { maxStepsPerInvocation: opts.maxStepsPerInvocation } : {}) })))
+      return json(200, result(await execute(inv, wf, io, { deadline, ...(opts.apiBaseUrl ? { apiBaseUrl: opts.apiBaseUrl } : {}), ...(opts.maxStepsPerInvocation ? { maxStepsPerInvocation: opts.maxStepsPerInvocation } : {}) })))
     } catch (e) {
       if (e instanceof InvocationSuperseded) return json(409, { code: "invocation_superseded" })
       // The code goes top level (as before) and in the kit's error shape, which dispatch reads:

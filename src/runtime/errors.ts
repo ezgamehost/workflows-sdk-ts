@@ -2,14 +2,14 @@ import type { WireError } from "../protocol/index.ts"
 import { truncateUtf8, utf8Length } from "../protocol/bytes.ts"
 
 // A step error that retrying won't fix: the step fails at once (code workflows.non_retriable).
-export class NonRetriableError extends Error { override name = "NonRetriableError" }
+export class NonRetriableError extends Error { override name = "NonRetriableError"; readonly code = "workflows.non_retriable" }
 // A retryable step error with the delay before the next attempt.
 export class RetryAfterError extends Error {
   override name = "RetryAfterError"
   constructor(message: string, readonly delayMs: number) { super(message) }
 }
 // Thrown into a workflow's pending call when its run is cancelled (code workflows.cancelled).
-export class CancelledError extends Error { override name = "CancelledError" }
+export class CancelledError extends Error { override name = "CancelledError"; readonly code = "workflows.cancelled" }
 // WorkflowError is an error with a code and JSON data, and what a recorded failure is rebuilt as
 // on replay. Codes on the wire are "user" or the platform's own "workflows.*" codes: any other
 // code is sent as "user", with
@@ -25,6 +25,20 @@ export class WorkflowError extends Error {
     if (opts.data !== undefined) this.data = opts.data
   }
 }
+// A callback that wasn't completed before its timeout: what Callback.wait() rejects with
+// (code workflows.callback_timeout). Catchable; it isn't retried.
+export class CallbackTimeout extends WorkflowError {
+  constructor(message: string, opts: { name?: string; data?: unknown; cause?: unknown } = {}) {
+    super(message, { ...opts, code: "workflows.callback_timeout", name: opts.name ?? "CallbackTimeout" })
+  }
+}
+// A child run that failed: what step.invoke rejects with (code workflows.child_failed); cause is
+// the child's own error.
+export class ChildFailed extends WorkflowError {
+  constructor(message: string, opts: { name?: string; data?: unknown; cause?: unknown } = {}) {
+    super(message, { ...opts, code: "workflows.child_failed", name: opts.name ?? "ChildFailed" })
+  }
+}
 // Errors the runtime raises itself.
 export class StepTimeout extends Error { override name = "StepTimeout" }
 export class DuplicateStepName extends Error { override name = "DuplicateStepName" }
@@ -33,6 +47,7 @@ export class OutputTooLarge extends Error { override name = "OutputTooLarge" }
 const MAX_STACK_BYTES = 8192
 const MAX_MESSAGE_BYTES = 8192
 const MAX_DATA_BYTES = 65_536
+// At most 8 levels in all, the error and 7 causes (internal/protocol MaxErrorDepth).
 const MAX_DEPTH = 8
 // The platform's own codes (internal/protocol); a customer error with any other code is sent as user.
 const PLATFORM_CODES = new Set([
@@ -60,7 +75,7 @@ function jsonData(v: unknown): unknown {
 
 // encodeError: the wire shape of anything a workflow throws (design, "Errors"). Codes are "user"
 // or "workflows.*" (see WorkflowError); messages and stacks are cut to 8 KiB of UTF-8 and data
-// over 64 KiB of JSON is dropped; causes nest at most 8 deep.
+// over 64 KiB of JSON is dropped; the error and its causes are at most 8 levels in all.
 export function encodeError(e: unknown, depth = 0): WireError {
   if (!(e instanceof Error)) return { code: "user", name: "Error", message: truncateUtf8(typeof e === "string" ? e : safeString(e), MAX_MESSAGE_BYTES) }
   let code = codeOf(e)
@@ -75,7 +90,7 @@ export function encodeError(e: unknown, depth = 0): WireError {
   const w: WireError = { code, name: truncateUtf8(String(name), 256), message: truncateUtf8(String(e.message), MAX_MESSAGE_BYTES) }
   if (data !== undefined && utf8Length(JSON.stringify(data)) <= MAX_DATA_BYTES) w.data = data
   if (typeof e.stack === "string" && e.stack) w.stack = truncateUtf8(e.stack, MAX_STACK_BYTES)
-  if (e.cause !== undefined && depth < MAX_DEPTH) w.cause = encodeError(e.cause, depth + 1)
+  if (e.cause !== undefined && depth + 1 < MAX_DEPTH) w.cause = encodeError(e.cause, depth + 1)
   return w
 }
 
@@ -91,6 +106,8 @@ export function decodeError(w: WireError): Error {
   switch (w.code) {
     case "workflows.non_retriable": e = new NonRetriableError(w.message, cause ? { cause } : undefined); break
     case "workflows.cancelled": e = new CancelledError(w.message, cause ? { cause } : undefined); break
+    case "workflows.callback_timeout": e = new CallbackTimeout(w.message, { name: w.name, data: w.data, cause }); break
+    case "workflows.child_failed": e = new ChildFailed(w.message, { name: w.name, data: w.data, cause }); break
     default: e = new WorkflowError(w.message, { code: w.code, name: w.name, data: w.data, cause })
   }
   e.name = w.name
