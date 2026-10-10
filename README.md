@@ -118,6 +118,43 @@ Parallel steps, callbacks and child workflows need a workflows-stack serving pro
 invocation at protocol 1.0 runs steps one after another, and `createCallback` and `invoke` fail
 the run with `NonRetriableError`.
 
+## Pull workers
+
+A pull worker polls EZGH for work instead of exposing an HTTPS endpoint: for code behind a
+firewall, or long CPU-bound steps (a pull app's invocation deadline is its longest announced
+workflow timeout, default 15 minutes and at most 24 hours, kept honest by heartbeats). Create a
+pull app (`kind: "pull"`, with a task queue and its partitions), then run a worker anywhere with
+`fetch` (Node, Bun, Deno):
+
+```ts
+import { worker } from "@ezgh/workflows"
+
+const w = worker({ apiKey, organizationId, projectId, app: pullAppId, workflows: [resize], queue: "default" })
+process.on("SIGTERM", () => void w.stop())
+await w.run()
+```
+
+- **Polling:** one long poll at a time (held up to 55 s) for up to `maxTasks` tasks (1–10, default
+  4), never more than the free slots of `concurrency` (default 10 invocations at once). Each poll
+  announces the worker's workflows, so they show on the app. 429, 5xx and network errors are
+  retried with jittered backoff (at most `backoffMaxMs`, default 30 s); a refused API key or
+  permission rejects `run()` with `WorkerAuthError`, and an unknown app or queue with
+  `WorkerConfigError`.
+- **Heartbeats:** a running invocation heartbeats every `heartbeatIntervalMs` (default 20 s; EZGH
+  re-dispatches after 60 s without one). When the run is cancelling, each running step's `signal`
+  aborts with a `CancelledError`, so pass it on.
+- **`stop({ graceMs })`** stops polling at once, waits up to `graceMs` (default 30 s) for running
+  invocations, then resolves `run()`; EZGH re-dispatches whatever was abandoned.
+
+The API key needs `workflows.workers.poll` (and `workflows.apps.sync` to announce workflows).
+[Example](examples/worker/worker.ts).
+
+## Dev mode
+
+`worker({ …, dev: true })` polls the queue `dev-<user>` (from `$USER`, `$USERNAME` or `$LOGNAME`, or
+`dev: { user }`) of the same pull app instead of its queue, so each developer runs workflows on
+their own machine, with no tunnel, without taking each other's runs.
+
 ## The Client
 
 `new Client({ apiKey, organizationId, projectId, baseUrl?, retries?, maxRetryDelayMs? })` calls
