@@ -18,7 +18,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 // httpLive talks to workflows-live (plan D2, D25) with Authorization: Bearer <invocation token>.
 // 409 means superseded; 429, 5xx and network errors are retried with backoff; anything else
 // non-2xx fails the invocation.
-export function httpLive(base: string, token: string, fetchImpl: typeof fetch = fetch, opts: LiveOptions = {}): LiveIO {
+export function httpLive(base: string, token: string, fetchImpl: FetchLike = (u, i) => fetch(u, i), opts: LiveOptions = {}): LiveIO {
   const root = base.replace(/\/+$/, "")
   const attempts = opts.attempts ?? 4
   const delay = opts.retryDelayMs ?? 200
@@ -51,3 +51,6 @@ export function httpLive(base: string, token: string, fetchImpl: typeof fetch = 
     },
   }
 }
+
+// FetchLike is the part of fetch the SDK uses; the global fetch satisfies it.
+export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
