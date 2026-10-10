@@ -1,0 +1,15 @@
+{
+  "description": "InputHash: hex SHA-256 of the input's canonical JSON (kit/canonical: sorted keys, no whitespace). An absent input hashes as null.",
+  "cases": [
+    {
+      "input": {
+        "userId": "u_1"
+      },
+      "hash": "6cae1fc333a77accbec38926c8dd768d60d5529816017b9214a292c843c300bd"
+    },
+    {
+      "input": null,
+      "hash": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
+    }
+  ]
+}
