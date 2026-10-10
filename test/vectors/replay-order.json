@@ -1,6 +1,6 @@
 {
   "description": "Replay resolves recorded outcomes one at a time in seq order, yielding between each. The code races step a against step b and then runs a step named after the winner. b committed first (seq 1), so replay must take the b branch.",
-  "workflow": "conf-race",
+  "workflow": "race",
   "journal": {
     "complete": true,
     "entries": [

@@ -27,3 +27,47 @@ jobs:
           node-version: 24
       - run: bun install --frozen-lockfile
       - run: bun run check
+
+  # workflows-stack's conformance harness (cmd/workflows-conformance, protocol/conformance) against
+  # conformance/app.ts, at the workflows-stack commit in .workflows-stack-rev. workflows-stack is
+  # internal: the job reads it with the WORKFLOWS_STACK_READ_TOKEN secret (read-only contents), and
+  # skips with a notice when the secret isn't set. Fork pull requests get no secrets: skipped.
+  conformance:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - id: token
+        env:
+          TOKEN: ${{ secrets.WORKFLOWS_STACK_READ_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then echo "present=true" >> "$GITHUB_OUTPUT"
+          else echo "::notice title=conformance skipped::WORKFLOWS_STACK_READ_TOKEN isn't set, so this job can't read ezgamehost/workflows-stack; the conformance harness didn't run."; fi
+      - if: steps.token.outputs.present == 'true'
+        uses: actions/checkout@v7
+      - if: steps.token.outputs.present == 'true'
+        id: rev
+        run: echo "sha=$(cat .workflows-stack-rev)" >> "$GITHUB_OUTPUT"
+      - if: steps.token.outputs.present == 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: ezgamehost/workflows-stack
+          ref: ${{ steps.rev.outputs.sha }}
+          token: ${{ secrets.WORKFLOWS_STACK_READ_TOKEN }}
+          path: .workflows-stack
+          persist-credentials: false
+      - if: steps.token.outputs.present == 'true'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: .workflows-stack/go.mod
+          cache-dependency-path: .workflows-stack/go.sum
+      - if: steps.token.outputs.present == 'true'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - if: steps.token.outputs.present == 'true'
+        run: bun install --frozen-lockfile
+      - if: steps.token.outputs.present == 'true'
+        name: vendored vectors match workflows-stack
+        run: diff -r --exclude SOURCE .workflows-stack/protocol/vectors test/vectors --exclude README.md
+      - if: steps.token.outputs.present == 'true'
+        run: scripts/conformance.sh .workflows-stack

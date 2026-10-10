@@ -94,6 +94,12 @@ bun install
 bun run check        # typecheck, tests, build, a Node import smoke test, npm pack --dry-run
 ```
 
+`conformance/app.ts` is the conformance app every EZGH Workflows SDK implements
+(workflows-stack `protocol/conformance/workflows.md`). `scripts/conformance.sh <workflows-stack
+checkout>` builds workflows-stack's harness and runs its scenarios against it; CI does the same
+at `.workflows-stack-rev` (it reads the internal workflows-stack repo with the
+`WORKFLOWS_STACK_READ_TOKEN` secret and skips with a notice without it).
+
 `test/vectors` is a verbatim copy of workflows-stack's `protocol/vectors` at the commit in
 `.workflows-stack-rev`; refresh it with `scripts/sync-vectors.sh <workflows-stack checkout> [<commit>]`.
 
