@@ -271,11 +271,21 @@ export function worker(opts: WorkerOptions): Worker {
   // drain waits up to graceMs for running invocations, then cancels their steps (each step's signal
   // aborts, and no new step starts) and waits at most 5 s more. What's still running is abandoned:
   // the engine's heartbeat and deadline timers re-dispatch it.
+  // Its timers are cleared once the invocations settle, so a stopped worker keeps no process alive.
   async function drain(graceMs: number): Promise<void> {
-    await Promise.race([Promise.allSettled([...active]), sleep(graceMs)])
+    if (active.size === 0) return
+    await settledWithin(graceMs)
     if (active.size === 0) return
     for (const c of cancels) if (!c.signal.aborted) c.abort(new CancelledError("The worker is stopping"))
-    await Promise.race([Promise.allSettled([...active]), sleep(CANCEL_WAIT_MS)])
+    await settledWithin(CANCEL_WAIT_MS)
+  }
+  async function settledWithin(ms: number): Promise<void> {
+    const timer = new AbortController()
+    try {
+      await Promise.race([Promise.allSettled([...active]), sleep(ms, timer.signal)])
+    } finally {
+      timer.abort()
+    }
   }
 
   return {

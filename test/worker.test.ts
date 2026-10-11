@@ -245,6 +245,30 @@ describe("pull worker", () => {
     expect(live.completes.length).toBe(1)
   })
 
+  test("stop() leaves no timer behind, so an idle worker's process exits at once", async () => {
+    const live = new FakeLive()
+    live.holdMs = 60_000
+    const pending = new Map<unknown, number>()
+    const realSet = globalThis.setTimeout, realClear = globalThis.clearTimeout
+    globalThis.setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...a: unknown[]) => {
+      const t: unknown = realSet(() => { pending.delete(t); fn(...a) }, ms)
+      pending.set(t, ms ?? 0)
+      return t
+    }) as unknown as typeof setTimeout
+    globalThis.clearTimeout = ((t: unknown) => { pending.delete(t); realClear(t as Parameters<typeof clearTimeout>[0]) }) as typeof clearTimeout
+    try {
+      const w = worker({ ...base(live), workflows: [pulled] })
+      const running = w.run()
+      await until(() => live.polls.length >= 1)
+      await w.stop()
+      await running
+      expect([...pending.values()].filter((ms) => ms >= 1000)).toEqual([]) // the 30 s grace timer is cleared
+    } finally {
+      globalThis.setTimeout = realSet
+      globalThis.clearTimeout = realClear
+    }
+  })
+
   test("a poll answer arriving as stop() begins is run within the grace period, not dropped", async () => {
     const live = new FakeLive()
     live.slowBodyMs = 150 // the answer's headers arrive, its body (the started tasks) a moment later
