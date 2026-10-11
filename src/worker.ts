@@ -30,8 +30,10 @@ export interface WorkerOptions {
   // Callback URLs when an invocation carries no endpoints.api.
   apiBaseUrl?: string
   workerId?: string
-  // Dev mode: poll the queue dev-<user> (the given user, else $USER, $USERNAME or $LOGNAME), so
-  // developers sharing a project never take each other's runs.
+  // Dev mode: poll the queue dev-<user> (the given user, else $USER, $USERNAME or $LOGNAME). The
+  // live host serves only an app's own queue, so app must be the developer's own pull app with
+  // that queue: Client.devApp() creates or finds it. Developers sharing a project then never take
+  // each other's runs.
   dev?: boolean | { user?: string }
   // How often a running invocation heartbeats (default 20 s; the engine's heartbeat timeout is 60 s).
   heartbeatIntervalMs?: number
@@ -69,6 +71,8 @@ const DEFAULT_LIVE = "https://workflows-live.ezghcloud.com"
 const QUEUE = /^[a-z0-9][a-z0-9-]{0,62}$/
 const WORKER_ID = /^[A-Za-z0-9._:-]{1,128}$/
 const POLL_TIMEOUT_MS = 70_000 // the gateway holds a poll at most 55 s
+const MAX_HEARTBEAT_INTERVAL_MS = 30_000
+const DEFAULT_GRACE_MS = 30_000
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -131,7 +135,9 @@ export function worker(opts: WorkerOptions): Worker {
   const concurrency = opts.concurrency ?? 10
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new TypeError("concurrency is a whole number ≥ 1")
   const heartbeatMs = opts.heartbeatIntervalMs ?? 20_000
-  if (!Number.isFinite(heartbeatMs) || heartbeatMs <= 0) throw new TypeError("heartbeatIntervalMs is a number > 0")
+  // Well inside the engine's 60 s heartbeat timeout, so one lost heartbeat never costs the invocation.
+  if (!Number.isFinite(heartbeatMs) || heartbeatMs <= 0 || heartbeatMs > MAX_HEARTBEAT_INTERVAL_MS)
+    throw new TypeError(`heartbeatIntervalMs is a number from 1 to ${MAX_HEARTBEAT_INTERVAL_MS} (the engine's heartbeat timeout is 60 s)`)
   const backoffMax = opts.backoffMaxMs ?? 30_000
   if (!Number.isFinite(backoffMax) || backoffMax < 0) throw new TypeError("backoffMaxMs is a number ≥ 0")
   if (opts.maxStepsPerInvocation !== undefined && (!Number.isInteger(opts.maxStepsPerInvocation) || opts.maxStepsPerInvocation < 1))
@@ -148,6 +154,9 @@ export function worker(opts: WorkerOptions): Worker {
   const active = new Set<Promise<void>>()
   const stopped = new AbortController()
   let pollAbort: AbortController | undefined
+  // The poll in flight and the handing of its invocations to handle(): stop() waits for it, so a
+  // poll answer arriving as stop begins is run (within the grace period), never dropped.
+  let cycle: Promise<void> | undefined
   let isRunning = false
   let release: () => void = () => {}
   const released = new Promise<void>((r) => (release = r))
@@ -160,6 +169,8 @@ export function worker(opts: WorkerOptions): Worker {
       body: JSON.stringify({ app: opts.app, queue, maxTasks: want, workerId, protocolVersions: [...PROTOCOL_VERSIONS], sdk, workflows: announce }),
       signal: anySignal(pollAbort.signal, AbortSignal.timeout(POLL_TIMEOUT_MS)),
     })
+    // The answer has begun: the gateway may have started tasks for it, so stop() no longer aborts it.
+    pollAbort = undefined
     const receivedAt = Date.now()
     if (res.status === 204) { await res.body?.cancel().catch(() => {}); return { invocations: [], receivedAt } }
     const text = await res.text()
@@ -173,7 +184,8 @@ export function worker(opts: WorkerOptions): Worker {
     if (res.status === 401 || res.status === 403)
       throw new WorkerAuthError(res.status, `workflows-live refused the poll (${res.status}${code ? ` ${code}` : ""}): check the API key and its workflows.workers.poll permission`)
     if (res.status === 429 || res.status >= 500) throw new Retryable(`workflows-live answered ${res.status}${code ? ` ${code}` : ""}`, retryAfterMs(res))
-    throw new WorkerConfigError(res.status, code ?? "unknown", `workflows-live refused the poll: ${res.status}${code ? ` ${code}` : ""}`)
+    throw new WorkerConfigError(res.status, code ?? "unknown", `workflows-live refused the poll: ${res.status}${code ? ` ${code}` : ""}` +
+      (opts.dev && res.status === 400 ? ` (dev mode polls ${queue}: app must be your own pull app with that queue; Client.devApp() creates it)` : ""))
   }
 
   async function heartbeat(inv: Invocation, cancel: AbortController, superseded: () => void): Promise<void> {
@@ -187,7 +199,13 @@ export function worker(opts: WorkerOptions): Worker {
         if (!cancel.signal.aborted) cancel.abort(new CancelledError("This invocation was superseded"))
         return
       }
-      if (!res.ok) { await res.body?.cancel().catch(() => {}); return }
+      if (!res.ok) {
+        // 401/403: the invocation token was refused; 5xx: the engine is unreachable. The step keeps
+        // running; without heartbeats the engine re-dispatches after its timeout.
+        await res.body?.cancel().catch(() => {})
+        onError(new Error(`workflows-live answered the heartbeat with ${res.status}`), "heartbeat")
+        return
+      }
       const body = (await res.json()) as HeartbeatResponse
       if (body?.cancel && !cancel.signal.aborted) cancel.abort(new CancelledError("The run is cancelling"))
     } catch (e) {
@@ -242,6 +260,9 @@ export function worker(opts: WorkerOptions): Worker {
     }
   }
 
+  // drain waits up to graceMs for running invocations.
+  const drain = (graceMs: number) => Promise.race([Promise.allSettled([...active]), sleep(graceMs)])
+
   return {
     async run() {
       if (isRunning) throw new Error("This worker is already running")
@@ -251,21 +272,33 @@ export function worker(opts: WorkerOptions): Worker {
         while (!stopped.signal.aborted) {
           while (active.size >= concurrency && !stopped.signal.aborted) await Promise.race([...active, released])
           if (stopped.signal.aborted) break
-          let got
+          let done!: () => void
+          cycle = new Promise<void>((r) => (done = r))
           try {
-            got = await poll(Math.min(maxTasks, concurrency - active.size))
-          } catch (e) {
-            if (stopped.signal.aborted) break
-            if (e instanceof WorkerAuthError || e instanceof WorkerConfigError) throw e
-            onError(e, "poll")
-            const backoff = Math.min(backoffMax, 500 * 2 ** Math.min(failures++, 16)) * (0.5 + Math.random() / 2)
-            await sleep(Math.max(e instanceof Retryable ? (e.retryAfterMs ?? 0) : 0, backoff), stopped.signal)
-            continue
-          }
-          failures = 0
-          for (const raw of got.invocations) {
-            const p: Promise<void> = handle(raw, got.receivedAt, got.serverDate).finally(() => active.delete(p))
-            active.add(p)
+            let got
+            try {
+              got = await poll(Math.min(maxTasks, concurrency - active.size))
+            } catch (e) {
+              if (e instanceof WorkerAuthError || e instanceof WorkerConfigError) {
+                // Fatal: stop polling, let running invocations finish (stop()'s grace), then reject.
+                stopped.abort()
+                await drain(DEFAULT_GRACE_MS)
+                throw e
+              }
+              if (stopped.signal.aborted) break
+              onError(e, "poll")
+              const backoff = Math.min(backoffMax, 500 * 2 ** Math.min(failures++, 16)) * (0.5 + Math.random() / 2)
+              await sleep(Math.max(e instanceof Retryable ? (e.retryAfterMs ?? 0) : 0, backoff), stopped.signal)
+              continue
+            }
+            failures = 0
+            // Even when stop() has begun: these tasks are started, and run within its grace period.
+            for (const raw of got.invocations) {
+              const p: Promise<void> = handle(raw, got.receivedAt, got.serverDate).finally(() => active.delete(p))
+              active.add(p)
+            }
+          } finally {
+            done()
           }
         }
         await Promise.race([Promise.allSettled([...active]), released])
@@ -273,10 +306,11 @@ export function worker(opts: WorkerOptions): Worker {
         isRunning = false
       }
     },
-    async stop({ graceMs = 30_000 } = {}) {
+    async stop({ graceMs = DEFAULT_GRACE_MS } = {}) {
       stopped.abort()
-      pollAbort?.abort()
-      await Promise.race([Promise.allSettled([...active]), sleep(graceMs)])
+      pollAbort?.abort() // a poll still waiting for its answer
+      await cycle?.catch(() => {})
+      await drain(graceMs)
       release()
     },
   }

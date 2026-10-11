@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { CancelledError, WorkerAuthError, devQueue, worker, workflow } from "../src/index.ts"
 import type { Invocation, InvocationResult, PollRequest } from "../src/protocol/index.ts"
 import { invocation } from "./helpers.ts"
+import { validateCheckpoint, validateInvocationResult, validatePollRequest } from "../src/protocol/validate.ts"
 
 const LIVE = "https://live.test"
 const ORG = "0199a3c2-5b1e-7d40-9f3a-2c8e6b1d4f70"
@@ -16,6 +17,10 @@ class FakeLive {
   queue: Invocation[][] = []                  // each poll answer, in order; then 204s
   pollStatus: number[] = []                   // scripted poll statuses before answers
   retryAfter = "0"                            // their Retry-After
+  holdMs = 30                                 // how long an empty poll is held
+  pollAborts = 0                              // held polls the worker aborted
+  slowBodyMs = 0                              // answers with tasks stream their body this late
+  answered = false                            // a poll answer with tasks has begun
   pollTimes: number[] = []
   checkpoints: { token: string; body: unknown }[] = []
   checkpointStatus = 204
@@ -30,6 +35,7 @@ class FakeLive {
     const auth = (init?.headers as Record<string, string>)?.Authorization ?? ""
     if (path === `/v1/organizations/${ORG}/projects/${PROJECT}/workers/poll`) {
       this.polls.push(JSON.parse(String(init!.body)))
+      validatePollRequest(this.polls.at(-1)) // what the gateway would accept
       this.pollTimes.push(Date.now())
       this.pollAuth.push(auth)
       const status = this.pollStatus.shift()
@@ -37,23 +43,30 @@ class FakeLive {
       const next = this.queue.shift()
       if (!next) {
         // Hold briefly like a long-poll, unless the worker aborts.
-        await new Promise<void>((r) => { const t = setTimeout(r, 30); init?.signal?.addEventListener("abort", () => { clearTimeout(t); r() }, { once: true }) })
-        if (init?.signal?.aborted) throw new DOMException("aborted", "AbortError")
+        await new Promise<void>((r) => { const t = setTimeout(r, this.holdMs); init?.signal?.addEventListener("abort", () => { clearTimeout(t); r() }, { once: true }) })
+        if (init?.signal?.aborted) { this.pollAborts++; throw new DOMException("aborted", "AbortError") }
         return new Response(null, { status: 204 })
       }
       this.running += next.length
       this.maxRunning = Math.max(this.maxRunning, this.running)
+      this.answered = true
+      if (this.slowBodyMs > 0) {
+        const text = JSON.stringify({ invocations: next }), delay = this.slowBodyMs
+        const body = new ReadableStream<Uint8Array>({ async start(c) { await sleep(delay); c.enqueue(new TextEncoder().encode(text)); c.close() } })
+        return new Response(body, { headers: { "Content-Type": "application/json", Date: new Date().toUTCString() } })
+      }
       return Response.json({ invocations: next }, { headers: { Date: new Date().toUTCString() } })
     }
     const token = auth.replace(/^Bearer /, "")
-    if (path === "/v1/invocations/checkpoint") { this.checkpoints.push({ token, body: JSON.parse(String(init!.body)) }); return new Response(null, { status: this.checkpointStatus }) }
+    if (path === "/v1/invocations/checkpoint") { validateCheckpoint(JSON.parse(String(init!.body))); this.checkpoints.push({ token, body: JSON.parse(String(init!.body)) }); return new Response(null, { status: this.checkpointStatus }) }
     if (path === "/v1/invocations/heartbeat") {
       this.heartbeats.push(token)
+      if (this.heartbeatStatus === 0) throw new TypeError("network down")
       if (this.heartbeatStatus !== 200) return new Response(null, { status: this.heartbeatStatus })
       const cancel = this.heartbeats.length >= this.cancelAfterHeartbeats ? { requestedAt: new Date().toISOString(), graceUntil: new Date(Date.now() + 60_000).toISOString() } : null
       return Response.json({ cancel })
     }
-    if (path === "/v1/invocations/complete") { this.completes.push({ token, result: JSON.parse(String(init!.body)) }); this.running--; return new Response(null, { status: 204 }) }
+    if (path === "/v1/invocations/complete") { validateInvocationResult(JSON.parse(String(init!.body))); this.completes.push({ token, result: JSON.parse(String(init!.body)) }); this.running--; return new Response(null, { status: 204 }) }
     return new Response(null, { status: 404 })
   }
 }
@@ -221,10 +234,62 @@ describe("pull worker", () => {
     const w = worker({ ...base(live), workflows: [slow] })
     const running = w.run()
     await until(() => live.checkpoints.length === 1)
+    live.holdMs = 60_000 // the next poll waits like a real long poll
+    await until(() => live.polls.length >= 2)
+    const t0 = Date.now()
     await w.stop({ graceMs: 2000 })
     await running
+    expect(live.pollAborts).toBe(1) // the waiting poll was aborted, not waited out
+    expect(Date.now() - t0).toBeLessThan(1500)
     expect(finished).toBe(true)
     expect(live.completes.length).toBe(1)
+  })
+
+  test("a poll answer arriving as stop() begins is run within the grace period, not dropped", async () => {
+    const live = new FakeLive()
+    live.slowBodyMs = 150 // the answer's headers arrive, its body (the started tasks) a moment later
+    live.queue.push([inv("pulled", "tok-late")])
+    const w = worker({ ...base(live), workflows: [pulled] })
+    const running = w.run()
+    await until(() => live.answered)
+    await w.stop({ graceMs: 3000 })
+    await running
+    expect(live.pollAborts).toBe(0)
+    expect(live.completes.map((c) => c.token)).toEqual(["tok-late"])
+  })
+
+  test("a fatal poll error (401) stops polling, lets running invocations finish, then rejects run()", async () => {
+    const live = new FakeLive()
+    let finished = false
+    const slow = workflow("slow", async ({ step }) => step.run("wait", async () => { await sleep(200); finished = true; return 1 }))
+    live.queue.push([inv("slow", "tok-f", {})])
+    const w = worker({ ...base(live), workflows: [slow], concurrency: 2 })
+    const running = w.run().then(() => "resolved", (e: unknown) => e)
+    await until(() => live.checkpoints.length === 1)
+    live.pollStatus.push(401)
+    const outcome = await running
+    expect(outcome).toBeInstanceOf(WorkerAuthError)
+    expect(finished).toBe(true)
+    expect(live.completes.map((c) => c.token)).toEqual(["tok-f"])
+    const polls = live.polls.length
+    await sleep(100)
+    expect(live.polls.length).toBe(polls) // no polling after the fatal error
+  })
+
+  test("heartbeat failures reach onError (a refused token, a network error)", async () => {
+    for (const status of [401, 0]) {
+      const live = new FakeLive()
+      live.heartbeatStatus = status
+      const errors: string[] = []
+      const slow = workflow("slow", async ({ step }) => step.run("wait", async () => { await sleep(120); return 1 }))
+      live.queue.push([inv("slow", `tok-hb${status}`, {})])
+      const w = worker({ ...base(live), workflows: [slow], onError: (e, ctx) => errors.push(`${ctx}: ${(e as Error).message}`) })
+      const running = w.run()
+      await until(() => live.completes.length === 1)
+      await w.stop()
+      await running
+      expect(errors.some((e) => e.startsWith("heartbeat") && (status === 0 ? e.includes("network down") : e.includes("401")))).toBe(true)
+    }
   })
 
   test("dev mode polls dev-<user>", async () => {
@@ -248,6 +313,8 @@ describe("pull worker", () => {
     expect(() => worker({ ...base(live), workflows: [pulled], queue: "Upper" })).toThrow(TypeError)
     expect(() => worker({ ...base(live), workflows: [pulled], queue: "under_score" })).toThrow(TypeError)
     expect(() => worker({ ...base(live), workflows: [pulled], workerId: "has space" })).toThrow(TypeError)
+    expect(() => worker({ ...base(live), workflows: [pulled], heartbeatIntervalMs: 60_000 })).toThrow(TypeError)
+    expect(() => worker({ ...base(live), workflows: [pulled], heartbeatIntervalMs: 30_000 })).not.toThrow()
     expect(() => worker({ ...base(live), workflows: [pulled], apiKey: "" })).toThrow(TypeError)
   })
 })

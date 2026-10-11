@@ -4,6 +4,7 @@ import type { Command, Invocation, JournalEntry, WireError } from "../src/protoc
 import { sign } from "../src/protocol/index.ts"
 import { callbackTokenHash, parseCallbackToken } from "../src/protocol/callback.ts"
 import { execute } from "../src/runtime/execution.ts"
+import { validateCommand } from "../src/protocol/validate.ts"
 import { decodeError, encodeError } from "../src/runtime/errors.ts"
 import { FakeLive, entry, invocation, sid } from "./helpers.ts"
 
@@ -14,7 +15,7 @@ const v11 = (wf: string, entries: JournalEntry[] = [], extra: Partial<Invocation
     protocolVersion: "1.1", endpoints: { live: "https://live.test", api: "https://api.test" },
     run: { id: RUN, workflow: wf, input: {}, attempt: 1, startedAt: "2026-10-09T12:00:00Z" }, ...extra,
   })
-const cmds = (xs: Command[]) => JSON.parse(JSON.stringify(xs)) as Record<string, unknown>[]
+const cmds = (xs: Command[]) => { xs.forEach(validateCommand); return JSON.parse(JSON.stringify(xs)) as Record<string, unknown>[] }
 
 describe("callbacks", () => {
   test("callbackCreated is acknowledged before the URL is visible; wait() suspends with waitForCallback", async () => {

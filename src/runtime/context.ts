@@ -23,7 +23,8 @@ export interface Callback<T = unknown> { readonly url: string; readonly token: s
 // timeoutMs: default 7 days, from 1 s to a year.
 export interface CreateCallbackOptions { timeoutMs?: number; id?: string }
 // workflow: a workflow of the same app, by name or as workflow() returned it. input: JSON, at most 1 MiB.
-export interface InvokeOptions<O = unknown> { workflow: string | Workflow<any, O>; input?: unknown; id?: string }
+// With a Workflow object, input is typed as that workflow's input; by name it's unknown.
+export interface InvokeOptions<I = unknown, O = unknown> { workflow: string | Workflow<I, O>; input?: I; id?: string }
 // What a step function is called with: signal aborts when the step passes its timeoutMs, or when
 // the run is cancelling (a pull worker's heartbeat says so), with a CancelledError reason.
 export interface StepRunContext { signal: AbortSignal; attempt: number; idempotencyKey: string }
@@ -43,7 +44,7 @@ export interface Step {
   createCallback<T = unknown>(name: string, opts?: CreateCallbackOptions): Promise<Callback<T>>
   // Starts a child run of a workflow in the same app and waits for it (protocol 1.1); resolves
   // with its output, or rejects with ChildFailed (cause: the child's error).
-  invoke<O = unknown>(name: string, opts: InvokeOptions<O>): Promise<Jsonify<O>>
+  invoke<I = unknown, O = unknown>(name: string, opts: InvokeOptions<I, O>): Promise<Jsonify<O>>
   // Inside step.run: `${runId}:${stepId}:${attempt}`, for idempotent calls to other systems.
   idempotencyKey(): string
 }

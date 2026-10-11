@@ -50,8 +50,19 @@ const parent = workflow("e2e-parent", async ({ input, step }) => {
   const v = (await step.invoke("child", { workflow: "e2e-child", input })) as number
   return step.run("plus-one", () => v + 1)
 })
-const fanout = workflow("e2e-fanout", async ({ step }) =>
-  ((await Promise.all([0, 1, 2, 3, 4].map((i) => step.run(`part-${i}`, async () => { await new Promise((r) => setTimeout(r, 200)); return i })))) as number[]).reduce((a, b) => a + b, 0))
+// The fan-out proves its steps run at the same time: each waits at a barrier until all five of
+// its run's parts are running (at most 30 s), and reports whether they met and its time window.
+const arrived = new Map<string, Set<number>>()
+const fanout = workflow("e2e-fanout", async ({ run, step }) => {
+  const parts = (await Promise.all([0, 1, 2, 3, 4].map((i) => step.run(`part-${i}`, async () => {
+    const start = Date.now()
+    const here = arrived.get(run.id) ?? new Set<number>()
+    arrived.set(run.id, here.add(i))
+    while (here.size < 5 && Date.now() - start < 30_000) await new Promise((r) => setTimeout(r, 20))
+    return { i, met: here.size === 5, start, end: Date.now() }
+  })))) as { i: number; met: boolean; start: number; end: number }[]
+  return { sum: parts.reduce((a, p) => a + p.i, 0), parts }
+})
 const scheduled = workflow("e2e-scheduled", async ({ run, step }) => step.run("note", () => run.schedule ?? null))
 
 const handler = serve({

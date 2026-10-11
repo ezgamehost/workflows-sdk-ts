@@ -1,6 +1,7 @@
 import type { Checkpoint, Command, Invocation, Journal, JournalEntry } from "../src/protocol/index.ts"
 import { stepId } from "../src/protocol/index.ts"
 import type { LiveIO } from "../src/runtime/live.ts"
+import { validateCheckpoint } from "../src/protocol/validate.ts"
 
 export const sid = (name: string, n = 0) => stepId(name, n)
 
@@ -23,7 +24,8 @@ export class FakeLive implements LiveIO {
   pages: Journal[] = []
   payloads = new Map<string, unknown>()
   ack: () => Promise<void> = async () => {}
-  async checkpoint(cp: Checkpoint) { this.checkpoints.push(structuredClone(cp)); await this.ack() }
+  // Every checkpoint the SDK sends must pass the engine's validation (validate.ts, vectors-tested).
+  async checkpoint(cp: Checkpoint) { validateCheckpoint(cp); this.checkpoints.push(structuredClone(cp)); await this.ack() }
   async journalPage(_afterSeq: number) { const p = this.pages.shift(); if (!p) throw new Error("no page"); return p }
   async payload(id: string) { if (!this.payloads.has(id)) throw new Error("no payload " + id); return this.payloads.get(id) }
   commandsOf(i: number): Command[] { return this.checkpoints[i]?.commands ?? [] }

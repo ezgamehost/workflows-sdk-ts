@@ -57,9 +57,12 @@ export function checkRetry(p: Partial<RetryPolicy>): void {
     throw new TypeError("A retry policy has integer maxAttempts 1–100, integer initialMs ≥ 0, integer maxMs 0–86,400,000 and multiplier 1–10")
 }
 
-// The longest step timeout: a step can't outlive an invocation (at most 900 s).
-export const MAX_TIMEOUT_MS = 900_000
+// The longest step timeout: 24 hours, a pull invocation's longest deadline (a pull app's deadline
+// is its longest announced workflow timeout, at least 15 minutes). Pushed invocations are shorter
+// (serve()'s maxInvocationSeconds, at most 900 s), and serve() refuses a workflow default longer
+// than that; a step can never outlive its invocation.
+export const MAX_TIMEOUT_MS = 86_400_000
 
 export function checkTimeout(ms: number): void {
-  if (typeof ms !== "number" || !Number.isInteger(ms) || ms <= 0 || ms > MAX_TIMEOUT_MS) throw new TypeError("timeoutMs is a whole number of milliseconds from 1 to 900,000")
+  if (typeof ms !== "number" || !Number.isInteger(ms) || ms <= 0 || ms > MAX_TIMEOUT_MS) throw new TypeError("timeoutMs is a whole number of milliseconds from 1 to 86,400,000 (24 hours)")
 }

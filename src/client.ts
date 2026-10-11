@@ -1,5 +1,6 @@
 import type { RetryPolicy, SDKInfo, WireError } from "./protocol/index.ts"
 import type { FetchLike } from "./runtime/live.ts"
+import { devQueue } from "./worker.ts"
 
 // Open unions: a later API may add values, so handle the unknown case.
 export type RunStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled" | "timedOut" | (string & {})
@@ -132,6 +133,37 @@ export class Client {
     return this.call("POST", "/apps", { name, kind, ...(opts.endpoint ? { endpoint: opts.endpoint } : {}), ...(opts.queue ? { queue: opts.queue } : {}), ...(opts.partitions !== undefined ? { partitions: opts.partitions } : {}) }, opts.idempotencyKey, false)
   }
   getApp(appId: string): Promise<App> { return this.call("GET", `/apps/${id(appId)}`) }
+  listApps(opts: { cursor?: string; limit?: number } = {}): Promise<{ apps: App[]; nextCursor: string | null }> {
+    const q = new URLSearchParams()
+    if (opts.cursor) q.set("cursor", opts.cursor)
+    if (opts.limit !== undefined) q.set("limit", String(opts.limit))
+    const qs = q.toString()
+    return this.call("GET", `/apps${qs ? `?${qs}` : ""}`)
+  }
+  // devApp creates, or finds, a developer's own pull app for dev mode: named and queued
+  // devQueue(user) (dev-<user>), so worker({ app: app.id, dev: true }) polls it. The live host
+  // serves only an app's own queue, so each developer needs an app of their own.
+  async devApp(opts: { user?: string; name?: string; partitions?: number } = {}): Promise<App> {
+    const queue = devQueue(opts.user)
+    const name = opts.name ?? queue
+    try {
+      return (await this.createApp(name, { kind: "pull", queue, ...(opts.partitions !== undefined ? { partitions: opts.partitions } : {}) })).app
+    } catch (e) {
+      // It exists (409 app_exists), or the create's outcome is unknown: find it by name.
+      if (!(e instanceof WorkflowsApiError && ((e.status === 409 && e.code === "app_exists") || e.code === "outcome_unknown"))) throw e
+    }
+    for (let cursor: string | undefined; ;) {
+      const page = await this.listApps({ limit: 100, ...(cursor ? { cursor } : {}) })
+      const app = page.apps.find((a) => a.name === name)
+      if (app) {
+        if (app.kind !== "pull" || app.queue !== queue)
+          throw new WorkflowsApiError(409, "app_exists", `The app "${name}" exists but isn't a pull app with the queue ${queue}; pass devApp({ name }) another name`)
+        return app
+      }
+      if (!page.nextCursor) throw new WorkflowsApiError(404, "not_found", `The dev app "${name}" was neither created nor found`)
+      cursor = page.nextCursor
+    }
+  }
   // sync asks EZGH to call the app's endpoint and record its workflows; run it after each deploy.
   // A failed sync is a 409 sync_failed.
   sync(appId: string, opts: { endpoint?: string; deployment?: string } = {}): Promise<App> {

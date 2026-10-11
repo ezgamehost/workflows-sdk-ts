@@ -121,8 +121,10 @@ the run with `NonRetriableError`.
 ## Pull workers
 
 A pull worker polls EZGH for work instead of exposing an HTTPS endpoint: for code behind a
-firewall, or long CPU-bound steps (a pull app's invocation deadline is its longest announced
-workflow timeout, default 15 minutes and at most 24 hours, kept honest by heartbeats). Create a
+firewall, or long CPU-bound steps. A pull invocation's deadline is the longest `timeoutMs` the
+app's workers announce, at least 15 minutes and at most 24 hours; heartbeats keep it honest. So
+for a step longer than 15 minutes, give its workflow a `timeoutMs` (the workflow option, which
+workers announce) that covers it. Create a
 pull app (`kind: "pull"`, with a task queue and its partitions), then run a worker anywhere with
 `fetch` (Node, Bun, Deno):
 
@@ -137,23 +139,37 @@ await w.run()
 - **Polling:** one long poll at a time (held up to 55 s) for up to `maxTasks` tasks (1–10, default
   4), never more than the free slots of `concurrency` (default 10 invocations at once). Each poll
   announces the worker's workflows, so they show on the app. 429, 5xx and network errors are
-  retried with jittered backoff (at most `backoffMaxMs`, default 30 s); a refused API key or
-  permission rejects `run()` with `WorkerAuthError`, and an unknown app or queue with
-  `WorkerConfigError`.
-- **Heartbeats:** a running invocation heartbeats every `heartbeatIntervalMs` (default 20 s; EZGH
-  re-dispatches after 60 s without one). When the run is cancelling, each running step's `signal`
+  retried with jittered backoff after any `Retry-After` (at most `backoffMaxMs`, default 30 s).
+  A refused API key or permission (`WorkerAuthError`) or an unknown app or queue
+  (`WorkerConfigError`) stops polling, lets running invocations finish (up to 30 s), then rejects
+  `run()`.
+- **Heartbeats:** a running invocation heartbeats every `heartbeatIntervalMs` (default 20 s, at
+  most 30 s: EZGH re-dispatches after 60 s without one). A failed heartbeat (a refused token, the
+  network) goes to `onError`. When the run is cancelling, each running step's `signal`
   aborts with a `CancelledError`, so pass it on.
-- **`stop({ graceMs })`** stops polling at once, waits up to `graceMs` (default 30 s) for running
-  invocations, then resolves `run()`; EZGH re-dispatches whatever was abandoned.
+- **`stop({ graceMs })`** stops polling at once (a poll still waiting is aborted; one whose answer
+  is arriving is run, since its tasks are started), waits up to `graceMs` (default 30 s) for
+  running invocations, then resolves `run()`; EZGH re-dispatches whatever was abandoned.
 
 The API key needs `workflows.workers.poll` (and `workflows.apps.sync` to announce workflows).
 [Example](examples/worker/worker.ts).
 
 ## Dev mode
 
-`worker({ …, dev: true })` polls the queue `dev-<user>` (from `$USER`, `$USERNAME` or `$LOGNAME`, or
-`dev: { user }`) of the same pull app instead of its queue, so each developer runs workflows on
-their own machine, with no tunnel, without taking each other's runs.
+Each developer runs workflows on their own machine, with no tunnel, through a pull app of their
+own: the live host serves only an app's own queue, so dev mode can't borrow the team's app.
+`client.devApp()` creates (or finds) the pull app `dev-<user>` with the queue `dev-<user>` (from
+`$USER`, `$USERNAME` or `$LOGNAME`, or `devApp({ user })`), and `worker({ dev: true })` polls that
+queue:
+
+```ts
+const app = await client.devApp()
+await worker({ apiKey, organizationId, projectId, app: app.id, dev: true, workflows: [resize] }).run()
+await client.start(app.id, "resize", { url })   // runs on this machine
+```
+
+Developers sharing a project never take each other's runs. `devApp` needs `workflows.apps.create`
+(and `workflows.apps.list` to find an existing one).
 
 ## The Client
 
@@ -218,7 +234,9 @@ value)` answers the run.
   its `code`, `name`, `data` and `cause`. Error codes on the wire are `user` or `workflows.*`: a
   `WorkflowError` with another code is sent as `user`, its code kept as the name and in
   `data.code`. Messages and stacks are cut to 8 KiB, and `data` over 64 KiB is dropped.
-- **Timeouts:** with `{ timeoutMs }` (at most 900,000: a step can't outlive an invocation) a step
+- **Timeouts:** with `{ timeoutMs }` (at most 24 hours; a step can't outlive its invocation, so
+  `serve()` refuses a workflow default longer than `maxInvocationSeconds`, and long steps need a
+  pull worker) a step
   that runs too long fails with
   `workflows.step_timeout` (retryable). The step function gets `{ signal, attempt,
   idempotencyKey }`; `signal` aborts at the timeout, so pass it to `fetch`.

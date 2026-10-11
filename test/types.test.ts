@@ -19,3 +19,18 @@ test("RunStatus and App.kind stay open to values a later API adds", () => {
   const k: App["kind"] = "scheduled"
   expect([s, k]).toEqual(["paused", "scheduled"])
 })
+
+test("step.invoke types its input as the child workflow's", () => {
+  const { workflow } = require("../src/index.ts") as typeof import("../src/index.ts")
+  const child = workflow("child", async ({ input }: { input: { n: number } }) => input.n * 10)
+  workflow("parent", async ({ step }) => {
+    const ok: number = await step.invoke("a", { workflow: child, input: { n: 3 } })
+    // @ts-expect-error input isn't the child's
+    await step.invoke("b", { workflow: child, input: { n: "three" } })
+    // @ts-expect-error a missing field
+    await step.invoke("c", { workflow: child, input: {} })
+    const byName: unknown = await step.invoke("d", { workflow: "child", input: "anything" })
+    return [ok, byName]
+  })
+  expect(true).toBe(true)
+})

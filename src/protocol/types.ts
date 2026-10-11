@@ -15,6 +15,9 @@ export interface JournalEntry {
   error?: WireError
   // A callback entry's token (protocol 1.1): replays rebuild the same URL from it. A credential.
   token?: string
+  // A callback entry's creation position (protocol 1.1): its seq moves to the completion, where
+  // wait() settles, and replay settles the creation here.
+  createdSeq?: number
 }
 export interface Journal { complete: boolean; entries: JournalEntry[] }
 // A scheduled run's schedule and scheduled time (the cron instant, not the jittered fire time).

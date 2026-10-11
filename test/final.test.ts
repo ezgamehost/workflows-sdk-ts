@@ -22,12 +22,15 @@ describe("values Go must decode and validate", () => {
     const wf = workflow("w", async ({ step }) => step.run("s", () => { throw new RetryAfterError("slow", NaN) }))
     expect((await execute(invocation("w"), wf, new FakeLive()))[0]).not.toHaveProperty("retryAfterMs")
   })
-  test("timeoutMs is at most 900,000 (a step can't outlive an invocation)", async () => {
-    expect(() => workflow("w", async () => 1, { timeoutMs: 900_001 })).toThrow(TypeError)
+  test("timeoutMs is at most 24 hours (a pull invocation's longest deadline); serve() refuses one longer than an invocation", async () => {
+    expect(() => workflow("w", async () => 1, { timeoutMs: 86_400_001 })).toThrow(TypeError)
     expect(() => workflow("w", async () => 1, { timeoutMs: 2 ** 31 + 5 })).toThrow(TypeError)
-    expect(() => workflow("w", async () => 1, { timeoutMs: 900_000 })).not.toThrow()
+    expect(() => workflow("w", async () => 1, { timeoutMs: 86_400_000 })).not.toThrow()
     const wf = workflow("w", async ({ step }) => step.run("s", () => 1, { timeoutMs: 3_000_000_000 }))
     expect(await execute(invocation("w"), wf, new FakeLive())).toEqual([{ type: "runFailed", error: expect.objectContaining({ name: "TypeError" }) }])
+    const long = workflow("long", async () => 1, { timeoutMs: 3_600_000 })
+    expect(() => serve({ workflows: [long], signingSecrets: ["whsec_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"] })).toThrow(/outlive/)
+    expect(() => serve({ workflows: [workflow("ok", async () => 1, { timeoutMs: 300_000 })], signingSecrets: ["whsec_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"] })).not.toThrow()
   })
   test("sleepUntil a past time sleeps until now, never a non-RFC 3339 year", async () => {
     const now = new Date("2026-10-10T12:00:00.000Z")

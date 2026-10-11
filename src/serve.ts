@@ -71,6 +71,9 @@ export function serve(opts: ServeOptions): (req: Request) => Promise<Response> {
     throw new TypeError("maxStepsPerInvocation is a whole number ≥ 1")
   const maxSeconds = opts.maxInvocationSeconds ?? 300
   if (!Number.isInteger(maxSeconds) || maxSeconds < 1 || maxSeconds > 900) throw new TypeError("maxInvocationSeconds is a whole number from 1 to 900")
+  for (const { def } of byName.values())
+    if (def.opts.timeoutMs !== undefined && def.opts.timeoutMs > maxSeconds * 1000)
+      throw new TypeError(`Workflow "${def.name}" has timeoutMs ${def.opts.timeoutMs}, longer than an invocation (maxInvocationSeconds ${maxSeconds}): a step can't outlive its invocation; long steps need a pull worker`)
   const deployment = opts.deployment ?? detectDeployment()
   const sdk = { name: SDK_NAME, version: SDK_VERSION }
   const fetchImpl: FetchLike = opts.fetch ?? ((u, i) => fetch(u, i))

@@ -123,7 +123,12 @@ console.log("ok   parent and child")
 
 // Parallel fan-out.
 const fan = await until((await client.start(appId, "e2e-fanout")).id, terminal)
-check(fan.status === "completed" && (await client.output(fan.id)) === 10 && [0, 1, 2, 3, 4].every((i) => stepNamed(fan, `part-${i}`)?.status === "completed"), "e2e-fanout's five steps complete", fan)
+const fanOut = (await client.output(fan.id)) as { sum: number; parts: { i: number; met: boolean; start: number; end: number }[] }
+check(fan.status === "completed" && fanOut.sum === 10 && [0, 1, 2, 3, 4].every((i) => stepNamed(fan, `part-${i}`)?.status === "completed"), "e2e-fanout's five steps complete", { fan, fanOut })
+// Concurrency, not just completion: all five were running at once (each saw the others at its
+// barrier), so their time windows overlap.
+const latestStart = Math.max(...fanOut.parts.map((p) => p.start)), earliestEnd = Math.min(...fanOut.parts.map((p) => p.end))
+check(fanOut.parts.every((p) => p.met) && latestStart <= earliestEnd, "e2e-fanout's five steps ran concurrently", fanOut)
 console.log("ok   parallel fan-out")
 
 // Pull worker: the worker announces e2e-pulled on its first poll; then a run of the pull app completes.

@@ -12,6 +12,7 @@ import { backoff, decodeSecret, encodeValue, isInvocationToken, shardOf, sign, S
 import { decodeError, encodeError } from "../src/runtime/errors.ts"
 import { InvalidInvocation, parseInvocation } from "../src/runtime/invocation.ts"
 import { codecValues } from "./helpers.ts"
+import { validateCheckpoint, validateCommand, validateInvocationResult, validatePollRequest } from "../src/protocol/validate.ts"
 import callbackTokens from "./vectors/callback-tokens.json"
 import derivedIds from "./vectors/derived-ids.json"
 import { callbackTokenHash, mintCallbackToken, parseCallbackToken } from "../src/protocol/callback.ts"
@@ -87,5 +88,14 @@ describe("workflows-stack protocol vectors", () => {
     expect(rfc3339Nano("2026-10-10T00:00:00.120Z")).toBe("2026-10-10T00:00:00.12Z")
     expect(rfc3339Nano("2026-10-10T02:00:00.123456789+02:00")).toBe("2026-10-10T00:00:00.123456789Z")
     expect(rfc3339Nano(new Date("2026-10-10T00:00:01.500Z"))).toBe("2026-10-10T00:00:01.5Z")
+  })
+  test("outgoing messages: commands, checkpoints, invocation results and poll requests, as the engine validates them", () => {
+    const check = { command: validateCommand, checkpoint: validateCheckpoint, invocationResult: validateInvocationResult, pollRequest: validatePollRequest } as const
+    for (const [kind, validate] of Object.entries(check)) {
+      const set = (messages as Record<string, { valid: unknown[]; invalid: unknown[] }>)[kind]!
+      expect(set.valid.length + set.invalid.length).toBeGreaterThan(1)
+      for (const m of set.valid) expect([kind, JSON.stringify(m), (() => { try { validate(m); return "ok" } catch (e) { return (e as Error).message } })()]).toEqual([kind, JSON.stringify(m), "ok"])
+      for (const m of set.invalid) expect([kind, JSON.stringify(m), (() => { try { validate(m); return "accepted" } catch { return "refused" } })()]).toEqual([kind, JSON.stringify(m), "refused"])
+    }
   })
 })

@@ -1,4 +1,5 @@
 import type { Command, Invocation, JournalEntry, PlannedStep, RetryPolicy, WireError } from "../protocol/index.ts"
+import { MAX_PLANNED_STEPS } from "../protocol/validate.ts"
 import { DEFAULT_RETRY, MAX_OUTPUT_BYTES, encodeValue, jsonByteLength, mintCallbackToken, parseDuration, shardOf, stepId, supportsParallel, validStepIdOverride, validWorkflowName } from "../protocol/index.ts"
 import { utf8Length } from "../protocol/bytes.ts"
 import type { Callback, Step, StepRunContext, StepRunOptions, WorkflowContext } from "./context.ts"
@@ -37,6 +38,11 @@ interface Call {
   fn?: (ctx: StepRunContext) => unknown; retry?: RetryPolicy; timeoutMs?: number; untilMs?: number; produce?: () => unknown
   workflow?: string; input?: unknown
 }
+// replaySeq is where a recorded call settles in replay order: a callback's creation at its
+// createdSeq (protocol 1.1: the entry's seq moves to its completion, where wait() settles), every
+// other call at its entry's seq.
+const replaySeq = (c: Call, e: JournalEntry) => (c.kind === "callback" ? (e.createdSeq ?? e.seq) : e.seq)
+
 // What the frontier does next: run one step inline, or end the invocation with these commands.
 type Next = { kind: "inline"; call: Call; attempt: number } | { kind: "end"; commands: Command[] }
 
@@ -341,6 +347,8 @@ class Execution {
       const e = this.journal.get(c.stepId!)
       return { kind: "inline", call: c, attempt: e?.status === "retrying" ? e.attempt + 1 : 1 }
     }
+    if (runs.length > MAX_PLANNED_STEPS)
+      return { kind: "end", commands: [{ type: "runFailed", error: encodeError(new NonRetriableError(`${runs.length} steps started at once; a run plans at most ${MAX_PLANNED_STEPS} together (start them in batches, or fan out through child workflows)`)) }] }
     return { kind: "end", commands: [...(runs.length > 0 ? [{ type: "planParallel" as const, steps: runs.map((r) => this.planned(r)) }] : []), ...suspends] }
   }
 
@@ -384,6 +392,9 @@ class Execution {
       .finally(() => this.wake?.())
     for (;;) {
       await idle()
+      // A step invocation reports only its target step (T1 rule 5): the run's outcome, even one
+      // its replay reaches (a race already won), is the orchestration's to report.
+      if (this.inv.kind === "step" && (this.fatal || this.finished)) return this.end([])
       if (this.fatal) return this.end([{ type: "runFailed", error: this.fatal }])
       if (this.finished) return this.end(this.terminal())
       const pending = this.calls.filter((c) => !c.settled)
@@ -396,13 +407,19 @@ class Execution {
       const recorded = pending
         .map((c) => [c, this.recordedEntry(c)] as const)
         .filter(([, e]) => e !== undefined)
-        .sort((a, b) => a[1]!.seq - b[1]!.seq || a[0].order - b[0].order)
+        .sort((a, b) => replaySeq(a[0], a[1]!) - replaySeq(b[0], b[1]!) || a[0].order - b[0].order)
       if (recorded.length > 0) { this.settleRecorded(recorded[0]![0], recorded[0]![1]!); continue }
       pending.sort((a, b) => a.order - b.order)
       if (this.inv.kind === "step") return this.stepInvocation(pending)
-      const c = pending[0]!
-      if (this.inv.cancel && !this.cancelThrown) { this.cancelThrown = true; c.settled = true; c.reject(new CancelledError("The run was cancelled")); continue }
-      if (this.cancelThrown && c.kind !== "run") { c.settled = true; c.reject(new CancelledError("The run is cancelling: only step.run cleanup steps can run")); continue }
+      if (this.inv.cancel && !this.cancelThrown) { const c0 = pending[0]!; this.cancelThrown = true; c0.settled = true; c0.reject(new CancelledError("The run was cancelled")); continue }
+      if (this.cancelThrown) {
+        const refused = pending.find((p) => p.kind !== "run")
+        if (refused) { refused.settled = true; refused.reject(new CancelledError("The run is cancelling: only step.run cleanup steps can run")); continue }
+      }
+      // While cancelling, a cleanup step doesn't wait behind steps the engine already owns (an
+      // in-flight parallel sibling): the next call is the oldest one the engine doesn't own.
+      const c = this.cancelThrown ? pending.find((p) => { const e = this.journal.get(p.stepId!); return !e || e.status === "retrying" }) : pending[0]!
+      if (!c) return this.end([])
       // The deciding call: at 1.1 the oldest call with no journal entry (D2-19; calls the engine
       // owns don't hold values back), at 1.0 and while cancelling the oldest pending call (phase 1).
       const head = this.parallel && !this.cancelThrown ? pending.find((p) => !this.journal.has(p.stepId!)) : c

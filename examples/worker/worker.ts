@@ -1,5 +1,6 @@
-// A pull worker: run with EZGH_API_KEY, EZGH_ORG, EZGH_PROJECT and EZGH_PULL_APP set.
-import { worker, workflow } from "@ezgh/workflows"
+// A pull worker: run with EZGH_API_KEY, EZGH_ORG and EZGH_PROJECT set, plus EZGH_PULL_APP in
+// production. In development (NODE_ENV isn't production) it runs on your own dev app instead.
+import { Client, worker, workflow } from "@ezgh/workflows"
 
 const resize = workflow("resize", async ({ input, step }) => {
   const { url } = input as { url: string }
@@ -7,9 +8,10 @@ const resize = workflow("resize", async ({ input, step }) => {
   return step.run("report", () => ({ url, bytes }))
 })
 
-const w = worker({
-  apiKey: process.env.EZGH_API_KEY!, organizationId: process.env.EZGH_ORG!, projectId: process.env.EZGH_PROJECT!,
-  app: process.env.EZGH_PULL_APP!, workflows: [resize], dev: process.env.NODE_ENV !== "production",
-})
+const creds = { apiKey: process.env.EZGH_API_KEY!, organizationId: process.env.EZGH_ORG!, projectId: process.env.EZGH_PROJECT! }
+const dev = process.env.NODE_ENV !== "production"
+// Dev mode: each developer's own pull app (dev-<user>), polled on its dev-<user> queue.
+const app = dev ? (await new Client(creds).devApp()).id : process.env.EZGH_PULL_APP!
+const w = worker({ ...creds, app, workflows: [resize], dev })
 process.on("SIGTERM", () => void w.stop())
 await w.run()

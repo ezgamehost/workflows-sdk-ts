@@ -116,3 +116,26 @@ test("createApp creates pull apps", async () => {
   await client.createApp("jobs", { kind: "pull", queue: "jobs", partitions: 2 })
   expect(body).toEqual({ name: "jobs", kind: "pull", queue: "jobs", partitions: 2 })
 })
+
+test("devApp creates the developer's pull app, or finds it by name when it exists", async () => {
+  const calls: string[] = []
+  const app = { id: "a-dev", name: "dev-alice", kind: "pull", queue: "dev-alice" }
+  let exists = false
+  const client = new Client({ apiKey: "k", organizationId: "o", projectId: "p", fetch: async (url, init) => {
+    const u = new URL(url)
+    calls.push(`${init!.method} ${u.pathname.replace("/v1/organizations/o/projects/p", "")}${u.search}`)
+    if (init!.method === "POST") {
+      expect(JSON.parse(String(init!.body))).toEqual({ name: "dev-alice", kind: "pull", queue: "dev-alice" })
+      return exists ? Response.json({ error: { code: "app_exists", message: "exists" } }, { status: 409 }) : Response.json({ app, signingSecret: null }, { status: 201 })
+    }
+    return Response.json({ apps: [{ id: "other", name: "x", kind: "push", queue: null }, app], nextCursor: null })
+  } })
+  expect((await client.devApp({ user: "Alice" })).id).toBe("a-dev")
+  exists = true
+  expect((await client.devApp({ user: "Alice" })).id).toBe("a-dev")
+  expect(calls).toEqual(["POST /apps", "POST /apps", "GET /apps?limit=100"])
+  const wrong = new Client({ apiKey: "k", organizationId: "o", projectId: "p", fetch: async (_u, init) =>
+    init!.method === "POST" ? Response.json({ error: { code: "app_exists", message: "exists" } }, { status: 409 })
+      : Response.json({ apps: [{ id: "push", name: "dev-alice", kind: "push", queue: null }], nextCursor: null }) })
+  await expect(wrong.devApp({ user: "alice" })).rejects.toThrow(/isn't a pull app/)
+})
