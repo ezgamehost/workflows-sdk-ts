@@ -74,7 +74,7 @@ export function httpLive(base: string, token: string, fetchImpl: FetchLike = (u,
       let res: Response | undefined
       let wait: number | undefined
       try {
-        res = await fetchImpl(root + path, { ...init, headers, signal: AbortSignal.timeout(Math.max(1, Math.floor(timeout))) })
+        res = await fetchImpl(root + path, { ...init, headers, signal: AbortSignal.timeout(Math.max(1, Math.floor(timeout))), redirect: "manual" })
       } catch (e) {
         last = e instanceof Error ? e.name : "network error"
         payloadDown = false

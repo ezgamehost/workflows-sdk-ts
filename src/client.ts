@@ -70,10 +70,50 @@ export interface ClientOptions {
   // most maxRetryDelayMs, default 10 s). Writes are resent with the same Idempotency-Key.
   retries?: number
   maxRetryDelayMs?: number
+  // Each request's timeout (default 30 s); a timed-out request is retried like a network error.
+  timeoutMs?: number
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const id = encodeURIComponent
+const DEFAULT_TIMEOUT_MS = 30_000
+
+// What an answer to a request that returns a secret (createApp, rotateSecret) can't be resent on:
+// the request may have taken effect, and its replay returns no secret.
+const outcomeUnknown = (why: string) => new WorkflowsApiError(0, "outcome_unknown",
+  `${why}, so the request may have taken effect: a resend would return no secret. Check with getApp, and rotate the app's secret if you didn't receive it.`)
+
+function checkLimit(limit: number | undefined): void {
+  if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) throw new TypeError("limit is a whole number ≥ 1")
+}
+
+function apiError(res: Response, data: unknown): WorkflowsApiError {
+  const e = (data as { error?: { code?: string; message?: string } } | undefined)?.error
+  const ra = Number(res.headers.get("Retry-After"))
+  if (res.status >= 300 && res.status < 400)
+    return new WorkflowsApiError(res.status, "redirect", `The API answered a redirect (${res.status}); requests are never redirected, so check baseUrl`)
+  return new WorkflowsApiError(res.status, e?.code ?? "unknown", e?.message ?? `HTTP ${res.status}`, Number.isFinite(ra) && ra >= 0 && res.headers.get("Retry-After") !== null ? ra : undefined)
+}
+
+// completeCallbackURL completes a callback by its URL (step.createCallback's url): it POSTs value
+// as JSON with no credential (the URL's token is the credential, so errors never include it). The
+// first completion wins: the same value again succeeds, a different one is 409
+// callback_completed, and after the timeout or the run's end it's 410 callback_expired.
+export async function completeCallbackURL(url: string, value: unknown, opts: { fetch?: FetchLike; timeoutMs?: number } = {}): Promise<void> {
+  const fetchImpl: FetchLike = opts.fetch ?? ((u, i) => fetch(u, i))
+  let res: Response
+  try {
+    res = await fetchImpl(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(value === undefined ? null : value),
+      redirect: "manual", signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS) })
+  } catch (e) {
+    throw new WorkflowsApiError(0, "network_error", `Completing the callback failed in transit: ${e instanceof Error ? e.name : "error"}`)
+  }
+  const text = await res.text()
+  if (res.ok) return
+  let data: unknown
+  try { data = text ? JSON.parse(text) : undefined } catch { data = undefined }
+  throw apiError(res, data)
+}
 
 // Client calls the Workflows API for one project: apps (create, sync, rotate the secret) and runs
 // (start, inspect, cancel, retry, payloads, events).
@@ -84,6 +124,7 @@ export class Client {
   readonly #fetch: FetchLike
   readonly #retries: number
   readonly #maxDelay: number
+  readonly #timeout: number
   constructor(opts: ClientOptions) {
     this.#apiKey = opts.apiKey
     this.#base = `${(opts.baseUrl ?? "https://workflows-api.ezghcloud.com").replace(/\/+$/, "")}/v1/organizations/${id(opts.organizationId)}/projects/${id(opts.projectId)}`
@@ -92,11 +133,22 @@ export class Client {
     this.#maxDelay = opts.maxRetryDelayMs ?? 10_000
     if (!Number.isInteger(this.#retries) || this.#retries < 0) throw new TypeError("retries is a whole number ≥ 0")
     if (!Number.isFinite(this.#maxDelay) || this.#maxDelay < 0) throw new TypeError("maxRetryDelayMs is a number ≥ 0")
+    this.#timeout = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    if (!Number.isFinite(this.#timeout) || this.#timeout <= 0) throw new TypeError("timeoutMs is a number > 0")
   }
 
-  // call sends one request, retrying 429, 503 and (unless resendOnNetworkError is false) network
-  // errors with the same Idempotency-Key.
-  private async call<T>(method: string, path: string, body?: unknown, idempotencyKey?: string, resendOnNetworkError = true, extraHeaders: Record<string, string> = {}): Promise<T> {
+  // call sends one request, retrying 429, 503, a 409 idempotency_in_progress and network errors
+  // (timeouts included) with the same Idempotency-Key, after Retry-After. Redirects are errors.
+  // returnsSecret (createApp, rotateSecret): only a 429 is retried; a network error, 503 or 409
+  // in progress is outcome_unknown, since the request may have taken effect and its replay would
+  // return no secret.
+  private call<T>(method: string, path: string, body?: unknown, idempotencyKey?: string, returnsSecret = false, extraHeaders: Record<string, string> = {}): Promise<T> {
+    if (idempotencyKey !== undefined && (typeof idempotencyKey !== "string" || idempotencyKey === ""))
+      throw new TypeError("An idempotencyKey is a non-empty string")
+    return this.send<T>(method, path, body, idempotencyKey, returnsSecret, extraHeaders)
+  }
+
+  private async send<T>(method: string, path: string, body: unknown, idempotencyKey: string | undefined, returnsSecret: boolean, extraHeaders: Record<string, string>): Promise<T> {
     const headers: Record<string, string> = { Authorization: `Bearer ${this.#apiKey}`, Accept: "application/json", ...extraHeaders }
     if (body !== undefined) headers["Content-Type"] = "application/json"
     if (method !== "GET") headers["Idempotency-Key"] = idempotencyKey ?? crypto.randomUUID()
@@ -105,10 +157,9 @@ export class Client {
     for (let attempt = 0; ; attempt++) {
       let res: Response
       try {
-        res = await this.#fetch(this.#base + path, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) })
+        res = await this.#fetch(this.#base + path, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}), redirect: "manual", signal: AbortSignal.timeout(this.#timeout) })
       } catch (e) {
-        if (!resendOnNetworkError)
-          throw new WorkflowsApiError(0, "outcome_unknown", `The request failed in transit (${e instanceof Error ? e.message : String(e)}), so it may have taken effect: a resend would return no secret. Check with getApp, and rotate the app's secret if you didn't receive it.`)
+        if (returnsSecret) throw outcomeUnknown(`The request failed in transit (${e instanceof Error ? e.message : String(e)})`)
         if (attempt >= retries) throw e
         await sleep(Math.min(maxDelay, 500 * 2 ** attempt))
         continue
@@ -117,23 +168,35 @@ export class Client {
       let data: unknown
       try { data = text ? JSON.parse(text) : undefined } catch { data = undefined }
       if (res.ok) return data as T
-      const e = (data as { error?: { code?: string; message?: string } } | undefined)?.error
-      const ra = Number(res.headers.get("Retry-After"))
-      const err = new WorkflowsApiError(res.status, e?.code ?? "unknown", e?.message ?? `HTTP ${res.status}`, Number.isFinite(ra) && ra > 0 ? ra : undefined)
-      if ((res.status !== 429 && res.status !== 503) || attempt >= retries) throw err
+      const err = apiError(res, data)
+      const inProgress = res.status === 409 && err.code === "idempotency_in_progress"
+      if (returnsSecret && (res.status === 503 || inProgress)) throw outcomeUnknown(`The API answered ${res.status} ${err.code}`)
+      if ((res.status !== 429 && res.status !== 503 && !inProgress) || attempt >= retries) throw err
       await sleep(Math.min(maxDelay, (err.retryAfterSeconds ?? 1) * 1000))
     }
   }
 
+  // withSecret is a secret-bearing answer: a push app's success without its secret is the replay of
+  // an earlier request (an Idempotency-Key reused), and the secret is lost: outcome_unknown.
+  private async withSecret(p: Promise<AppWithSecret>, pull = false): Promise<AppWithSecret> {
+    const r = await p
+    if (!pull && r?.signingSecret == null)
+      throw outcomeUnknown("The API answered with no signing secret (the replay of an earlier request with this Idempotency-Key)")
+    return r
+  }
+
   // Apps
-  // createApp returns the app and its signing secret, once. A network error isn't resent (the
-  // replay of a created app answers signingSecret: null): it throws outcome_unknown.
+  // createApp returns the app and its signing secret, once. An answer that leaves it unknown
+  // whether the app was created (a network error, a timeout, a 503, a 409 in progress, or a
+  // replay's null secret) throws outcome_unknown: a resend would return no secret. A 429 (not
+  // processed) is retried. A pull app has no secret.
   createApp(name: string, opts: { endpoint?: string; kind?: "push" | "pull"; queue?: string; partitions?: number; idempotencyKey?: string } = {}): Promise<AppWithSecret> {
     const kind = opts.kind ?? "push"
-    return this.call("POST", "/apps", { name, kind, ...(opts.endpoint ? { endpoint: opts.endpoint } : {}), ...(opts.queue ? { queue: opts.queue } : {}), ...(opts.partitions !== undefined ? { partitions: opts.partitions } : {}) }, opts.idempotencyKey, false)
+    return this.withSecret(this.call("POST", "/apps", { name, kind, ...(opts.endpoint ? { endpoint: opts.endpoint } : {}), ...(opts.queue ? { queue: opts.queue } : {}), ...(opts.partitions !== undefined ? { partitions: opts.partitions } : {}) }, opts.idempotencyKey, true), kind === "pull")
   }
   getApp(appId: string): Promise<App> { return this.call("GET", `/apps/${id(appId)}`) }
   listApps(opts: { cursor?: string; limit?: number } = {}): Promise<{ apps: App[]; nextCursor: string | null }> {
+    checkLimit(opts.limit)
     const q = new URLSearchParams()
     if (opts.cursor) q.set("cursor", opts.cursor)
     if (opts.limit !== undefined) q.set("limit", String(opts.limit))
@@ -171,7 +234,7 @@ export class Client {
   }
   // rotateSecret returns a new signing secret; the old ones stay valid for 24 hours.
   // A network error isn't resent, as for createApp (outcome_unknown).
-  rotateSecret(appId: string): Promise<AppWithSecret> { return this.call("POST", `/apps/${id(appId)}/rotate-secret`, {}, undefined, false) }
+  rotateSecret(appId: string): Promise<AppWithSecret> { return this.withSecret(this.call("POST", `/apps/${id(appId)}/rotate-secret`, {}, undefined, true)) }
 
   // Runs
   // start a run: 201 for a new run. With runKey, starting again with the same workflow and input
@@ -191,6 +254,7 @@ export class Client {
   input(runId: string): Promise<unknown> { return this.call("GET", `/runs/${id(runId)}/payloads/input`) }
   stepOutput(runId: string, stepId: string): Promise<unknown> { return this.call("GET", `/runs/${id(runId)}/steps/${id(stepId)}/output`) }
   events(runId: string, opts: { cursor?: string; limit?: number } = {}): Promise<{ events: RunEvent[]; nextCursor: string | null }> {
+    checkLimit(opts.limit)
     const q = new URLSearchParams()
     if (opts.cursor) q.set("cursor", opts.cursor)
     if (opts.limit !== undefined) q.set("limit", String(opts.limit))
@@ -203,6 +267,7 @@ export class Client {
   createSchedule(input: ScheduleInput, opts: { idempotencyKey?: string } = {}): Promise<Schedule> { return this.call("POST", "/schedules", input, opts.idempotencyKey) }
   getSchedule(scheduleId: string): Promise<Schedule> { return this.call("GET", `/schedules/${id(scheduleId)}`) }
   listSchedules(opts: { cursor?: string; limit?: number } = {}): Promise<{ schedules: ScheduleSummary[]; nextCursor: string | null }> {
+    checkLimit(opts.limit)
     const q = new URLSearchParams()
     if (opts.cursor) q.set("cursor", opts.cursor)
     if (opts.limit !== undefined) q.set("limit", String(opts.limit))
@@ -212,7 +277,7 @@ export class Client {
   // updateSchedule changes the given fields. revision is the schedule's revision you read
   // (If-Match): a change since then answers 412.
   updateSchedule(scheduleId: string, patch: ScheduleUpdate, opts: { revision: number }): Promise<Schedule> {
-    return this.call("PATCH", `/schedules/${id(scheduleId)}`, patch, undefined, true, { "If-Match": `"${opts.revision}"` })
+    return this.call("PATCH", `/schedules/${id(scheduleId)}`, patch, undefined, false, { "If-Match": `"${opts.revision}"` })
   }
   pauseSchedule(scheduleId: string): Promise<Schedule> { return this.call("POST", `/schedules/${id(scheduleId)}/pause`, {}) }
   // resumeSchedule fires again from now, with no catch-up.

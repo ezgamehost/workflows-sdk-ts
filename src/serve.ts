@@ -1,6 +1,6 @@
 import type { InvocationResult, SyncReply } from "./protocol/index.ts"
 import { PROTOCOL_VERSIONS, SIGNATURE_HEADER, SignatureError, decodeSecret, parseSignature, verifyParsed } from "./protocol/index.ts"
-import { detectDeployment } from "./env.ts"
+import { cleanDeployment, detectDeployment } from "./env.ts"
 import { execute } from "./runtime/execution.ts"
 import { InvalidInvocation, parseInvocation } from "./runtime/invocation.ts"
 import { CheckpointFailed, InvocationSuperseded, httpLive, type FetchLike } from "./runtime/live.ts"
@@ -8,6 +8,8 @@ import { definitionOf, type Workflow, type WorkflowDefinition } from "./runtime/
 import { SDK_NAME, SDK_VERSION } from "./version.ts"
 
 const MAX_BODY = 8 * 1024 * 1024
+// The result dispatch reads back (workflows-dispatch's cap).
+const MAX_RESULT = 16 * 1024 * 1024
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } })
 
 export interface ServeOptions {
@@ -18,7 +20,8 @@ export interface ServeOptions {
   signingSecrets: (string | undefined)[]
   // How long your platform lets a request run (1–900, default 300); EZGH sets deadlines inside it.
   maxInvocationSeconds?: number
-  // A deployment ID recorded with each invocation; detected on Vercel, Lambda and Cloud Run.
+  // A deployment ID recorded with each invocation (at most 256 bytes); detected on Vercel, AWS
+  // Lambda (not $LATEST), Cloud Run, Fly.io and Render.
   deployment?: string
   // The fetch used to call workflows-live (tests and custom transports).
   fetch?: FetchLike
@@ -74,7 +77,7 @@ export function serve(opts: ServeOptions): (req: Request) => Promise<Response> {
   for (const { def } of byName.values())
     if (def.opts.timeoutMs !== undefined && def.opts.timeoutMs > maxSeconds * 1000)
       throw new TypeError(`Workflow "${def.name}" has timeoutMs ${def.opts.timeoutMs}, longer than an invocation (maxInvocationSeconds ${maxSeconds}): a step can't outlive its invocation; long steps need a pull worker`)
-  const deployment = opts.deployment ?? detectDeployment()
+  const deployment = opts.deployment !== undefined ? cleanDeployment(opts.deployment) : detectDeployment()
   const sdk = { name: SDK_NAME, version: SDK_VERSION }
   const fetchImpl: FetchLike = opts.fetch ?? ((u, i) => fetch(u, i))
 
@@ -123,7 +126,7 @@ export function serve(opts: ServeOptions): (req: Request) => Promise<Response> {
     const reserveMs = Math.max(5000, total * 0.1)
     try {
       const io = httpLive(inv.endpoints.live, inv.token, fetchImpl, { deadline, reserveMs })
-      return json(200, result(await execute(inv, wf, io, { deadline, ...(opts.apiBaseUrl ? { apiBaseUrl: opts.apiBaseUrl } : {}), ...(opts.maxStepsPerInvocation ? { maxStepsPerInvocation: opts.maxStepsPerInvocation } : {}) })))
+      return json(200, result(await execute(inv, wf, io, { deadline, maxResultBytes: MAX_RESULT, ...(opts.apiBaseUrl ? { apiBaseUrl: opts.apiBaseUrl } : {}), ...(opts.maxStepsPerInvocation ? { maxStepsPerInvocation: opts.maxStepsPerInvocation } : {}) })))
     } catch (e) {
       if (e instanceof InvocationSuperseded) return json(409, { code: "invocation_superseded" })
       // The code goes top level (as before) and in the kit's error shape, which dispatch reads:

@@ -21,7 +21,8 @@ test("start posts to the project's runs with an API key and an Idempotency-Key",
 })
 
 test("routes: the default base URL is workflows-api.ezghcloud.com", async () => {
-  const { seen, f } = recorder(() => Response.json({}))
+  // A secret-bearing answer carries its secret (a push app's without one is outcome_unknown).
+  const { seen, f } = recorder(() => Response.json({ app: { id: "wfa_1", kind: "push" }, signingSecret: "whsec_x" }))
   const client = new Client({ apiKey: "k", organizationId: "o", projectId: "p", fetch: f })
   await client.get("r/1")
   await client.cancel("r1", { gracePeriodSeconds: 0 })

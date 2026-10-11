@@ -146,10 +146,15 @@ await w.run()
 - **Heartbeats:** a running invocation heartbeats every `heartbeatIntervalMs` (default 20 s, at
   most 30 s: EZGH re-dispatches after 60 s without one). A failed heartbeat (a refused token, the
   network) goes to `onError`. When the run is cancelling, each running step's `signal`
-  aborts with a `CancelledError`, so pass it on.
+  aborts with a `CancelledError` (pass it on), no new step starts, and the invocation ends: the
+  next one carries the cancel, so your cleanup (`finally`) runs there.
 - **`stop({ graceMs })`** stops polling at once (a poll still waiting is aborted; one whose answer
   is arriving is run, since its tasks are started), waits up to `graceMs` (default 30 s) for
-  running invocations, then resolves `run()`; EZGH re-dispatches whatever was abandoned.
+  running invocations, then cancels their steps (`signal` aborts) and waits at most 5 s more,
+  then resolves `run()`; EZGH re-dispatches whatever was abandoned.
+- **Limits:** a worker serves at most 1,000 workflows (checked by `worker()`), and an invocation's
+  result is at most 8 MiB of JSON: one bigger (say, many large child inputs at once) fails the run
+  with `NonRetriableError` instead of failing to send.
 
 The API key needs `workflows.workers.poll` (and `workflows.apps.sync` to announce workflows).
 [Example](examples/worker/worker.ts).
@@ -173,10 +178,13 @@ Developers sharing a project never take each other's runs. `devApp` needs `workf
 
 ## The Client
 
-`new Client({ apiKey, organizationId, projectId, baseUrl?, retries?, maxRetryDelayMs? })` calls
-the Workflows API at `baseUrl`, by default `https://workflows-api.ezghcloud.com`. It retries 429
-and 503 answers after `Retry-After` (default 3 retries, at most 10 s apart) with the same
-`Idempotency-Key`, and throws `WorkflowsApiError` with the HTTP `status` and the platform `code`.
+`new Client({ apiKey, organizationId, projectId, baseUrl?, retries?, maxRetryDelayMs?, timeoutMs? })`
+calls the Workflows API at `baseUrl`, by default `https://workflows-api.ezghcloud.com`. Each
+request times out after `timeoutMs` (default 30 s). It retries 429, 503, a 409
+`idempotency_in_progress` and network errors after `Retry-After` (default 3 retries, at most 10 s
+apart) with the same `Idempotency-Key` (an `idempotencyKey` you pass is a non-empty string), and
+throws `WorkflowsApiError` with the HTTP `status` and the platform `code`. Redirects are never
+followed: a 3xx is a `WorkflowsApiError` with code `redirect`.
 
 | Methods | Credential |
 | --- | --- |
@@ -185,10 +193,11 @@ and 503 answers after `Retry-After` (default 3 retries, at most 10 s apart) with
 | `createApp`, `getApp`, `sync`, `rotateSecret` | an EZGH API key with the `workflows.apps.*` actions it uses |
 | `createSchedule`, `getSchedule`, `listSchedules`, `updateSchedule`, `pauseSchedule`, `resumeSchedule`, `deleteSchedule`, `triggerSchedule` | an EZGH API key with the `workflows.schedules.*` actions it uses (create, update of the workflow, resume and trigger also need `workflows.runs.start` on the workflow) |
 
-`createApp` and `rotateSecret` return the signing secret once, so they aren't resent after a
-network error (a replay would answer `signingSecret: null`): they throw `WorkflowsApiError` with
-status 0 and code `outcome_unknown`. Check the app with `getApp`, and rotate its secret if you
-didn't receive one.
+`createApp` and `rotateSecret` return the signing secret once, and a resend's replay would answer
+`signingSecret: null`. So any answer that leaves the outcome unknown (a network error or timeout,
+a 503, a 409 `idempotency_in_progress`, or a push app's success without a secret) throws
+`WorkflowsApiError` with status 0 and code `outcome_unknown`; only a 429 (not processed) is
+retried. Check the app with `getApp`, and rotate its secret if you didn't receive one.
 
 **Pull apps:** `createApp(name, { kind: "pull", queue, partitions })` creates an app for
 [pull workers](#pull-workers); its partitions (1–32, default 4) may grow later but never shrink.
@@ -208,7 +217,8 @@ Options: `overlap` (`skip`, the default, `allow` or `bufferOne`), `jitterSeconds
 schedule started sees `run.schedule` (`{ id, scheduledTime }`).
 
 **Callbacks** can also be completed by an authenticated caller: `completeCallback(runId, stepId,
-value)` answers the run.
+value)` answers the run. Without a client, `completeCallbackURL(url, value)` POSTs the value to a
+callback's URL (no credential: the URL's token is one).
 
 ## Semantics
 
@@ -229,7 +239,9 @@ value)` answers the run.
   at most 10 minutes; override per step with `{ retry }`, or per workflow; partial policies are
   merged with the defaults). Bounds: `maxAttempts` 1–100, `maxMs` up to 24 hours, `multiplier`
   1–10. Throw
-  `NonRetriableError` to fail at once, or `RetryAfterError(message, delayMs)` to pick the delay (0 to 24 hours).
+  `NonRetriableError` to fail at once, or `RetryAfterError(message, delayMs)` to pick the delay (0 to 24 hours),
+  directly or as any error's `cause` (an error whose `code` is `workflows.non_retriable` isn't
+  retried either).
   On replay a recorded failure is rethrown as a `WorkflowError` (or the SDK class it was), with
   its `code`, `name`, `data` and `cause`. Error codes on the wire are `user` or `workflows.*`: a
   `WorkflowError` with another code is sent as `user`, its code kept as the name and in
@@ -280,8 +292,8 @@ under its derived scheduled run ID, then trigger (idempotent by key), pause and 
 job `e2e` runs it with the same secret rule. Against a slow shared database, set
 `E2E_TIME_SCALE` (for example `3`) to stretch every wait; no check changes.
 
-Verified end to end against workflows-stack 9624505 (phase 2): the CI job e2e ran the full suite
-three times, and conformance passed all 53 scenarios, push and pull.
+Verified end to end against workflows-stack 830dcb9 (phase 2): the CI job e2e ran the full suite
+three times, and conformance passed all 55 scenarios, push and pull.
 
 `test/vectors` is a verbatim copy of workflows-stack's `protocol/vectors` at the commit in
 `.workflows-stack-rev`; refresh it with `scripts/sync-vectors.sh <workflows-stack checkout> [<commit>]`.

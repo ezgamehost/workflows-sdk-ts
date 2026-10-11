@@ -4,7 +4,7 @@
 // Node, Bun and Deno (anything with fetch and timers).
 import type { HeartbeatResponse, Invocation, InvocationResult, WorkflowInfo } from "./protocol/index.ts"
 import { PROTOCOL_VERSIONS } from "./protocol/index.ts"
-import { detectDeployment } from "./env.ts"
+import { cleanDeployment, detectDeployment } from "./env.ts"
 import { CancelledError } from "./runtime/errors.ts"
 import { execute } from "./runtime/execution.ts"
 import { parseInvocation } from "./runtime/invocation.ts"
@@ -73,6 +73,9 @@ const WORKER_ID = /^[A-Za-z0-9._:-]{1,128}$/
 const POLL_TIMEOUT_MS = 70_000 // the gateway holds a poll at most 55 s
 const MAX_HEARTBEAT_INTERVAL_MS = 30_000
 const DEFAULT_GRACE_MS = 30_000
+// After the grace period, running steps are cancelled and get this long to finish.
+const CANCEL_WAIT_MS = 5000
+const MAX_WORKFLOWS = 1000
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -128,6 +131,8 @@ export function worker(opts: WorkerOptions): Worker {
     announce.push({ name: d.name, ...(d.opts.retry ? { retry: d.opts.retry } : {}), ...(d.opts.timeoutMs ? { timeoutMs: d.opts.timeoutMs } : {}) })
   }
   if (byName.size === 0) throw new TypeError("worker() needs at least one workflow")
+  // What an announcement may carry (internal/protocol MaxWorkflows): checked here, not at the first poll.
+  if (byName.size > MAX_WORKFLOWS) throw new TypeError(`A worker serves at most ${MAX_WORKFLOWS} workflows; got ${byName.size}`)
   const queue = opts.dev ? devQueue(typeof opts.dev === "object" ? opts.dev.user : undefined) : (opts.queue ?? "default")
   if (!QUEUE.test(queue)) throw new TypeError(`A queue name matches ^[a-z0-9][a-z0-9-]{0,62}$; got "${queue}"`)
   const maxTasks = opts.maxTasks ?? 4
@@ -148,10 +153,11 @@ export function worker(opts: WorkerOptions): Worker {
   if (!WORKER_ID.test(workerId)) throw new TypeError(`A worker ID matches ^[A-Za-z0-9._:-]{1,128}$; got "${workerId}"`)
   const fetchImpl: FetchLike = opts.fetch ?? ((u, i) => fetch(u, i))
   const sdk = { name: SDK_NAME, version: SDK_VERSION }
-  const deployment = opts.deployment ?? detectDeployment()
+  const deployment = opts.deployment !== undefined ? cleanDeployment(opts.deployment) : detectDeployment()
   const onError = opts.onError ?? (() => {})
 
   const active = new Set<Promise<void>>()
+  const cancels = new Set<AbortController>()
   const stopped = new AbortController()
   let pollAbort: AbortController | undefined
   // The poll in flight and the handing of its invocations to handle(): stop() waits for it, so a
@@ -167,7 +173,7 @@ export function worker(opts: WorkerOptions): Worker {
       method: "POST",
       headers: { Authorization: `Bearer ${opts.apiKey}`, "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify({ app: opts.app, queue, maxTasks: want, workerId, protocolVersions: [...PROTOCOL_VERSIONS], sdk, workflows: announce }),
-      signal: anySignal(pollAbort.signal, AbortSignal.timeout(POLL_TIMEOUT_MS)),
+      signal: anySignal(pollAbort.signal, AbortSignal.timeout(POLL_TIMEOUT_MS)), redirect: "manual",
     })
     // The answer has begun: the gateway may have started tasks for it, so stop() no longer aborts it.
     pollAbort = undefined
@@ -191,7 +197,7 @@ export function worker(opts: WorkerOptions): Worker {
   async function heartbeat(inv: Invocation, cancel: AbortController, superseded: () => void): Promise<void> {
     try {
       const res = await fetchImpl(`${inv.endpoints.live.replace(/\/+$/, "")}/v1/invocations/heartbeat`, {
-        method: "POST", headers: { Authorization: `Bearer ${inv.token}`, "Content-Type": "application/json" }, body: "{}", signal: AbortSignal.timeout(10_000),
+        method: "POST", headers: { Authorization: `Bearer ${inv.token}`, "Content-Type": "application/json" }, body: "{}", signal: AbortSignal.timeout(10_000), redirect: "manual",
       })
       if (res.status === 409) {
         await res.body?.cancel().catch(() => {})
@@ -220,7 +226,7 @@ export function worker(opts: WorkerOptions): Worker {
       if (left <= 0) throw new Error("No time left to complete the invocation; the engine re-dispatches it")
       let res: Response | undefined
       try {
-        res = await fetchImpl(url, { method: "POST", headers: { Authorization: `Bearer ${inv.token}`, "Content-Type": "application/json" }, body: JSON.stringify(result), signal: AbortSignal.timeout(Math.min(30_000, left)) })
+        res = await fetchImpl(url, { method: "POST", headers: { Authorization: `Bearer ${inv.token}`, "Content-Type": "application/json" }, body: JSON.stringify(result), signal: AbortSignal.timeout(Math.min(30_000, left)), redirect: "manual" })
       } catch { /* network error: retried below */ }
       if (res) {
         await res.body?.cancel().catch(() => {})
@@ -239,6 +245,7 @@ export function worker(opts: WorkerOptions): Worker {
     const deadline = serverDate === undefined ? sent : Math.min(sent, receivedAt + (sent - serverDate))
     const reserveMs = Math.max(5000, Math.max(0, deadline - receivedAt) * 0.1)
     const cancel = new AbortController()
+    cancels.add(cancel)
     let superseded = false
     const beat = setInterval(() => { void heartbeat(inv, cancel, () => { superseded = true }) }, heartbeatMs)
     try {
@@ -257,11 +264,19 @@ export function worker(opts: WorkerOptions): Worker {
       if (!(e instanceof InvocationSuperseded)) onError(e, `invocation ${inv.invocationId}`)
     } finally {
       clearInterval(beat)
+      cancels.delete(cancel)
     }
   }
 
-  // drain waits up to graceMs for running invocations.
-  const drain = (graceMs: number) => Promise.race([Promise.allSettled([...active]), sleep(graceMs)])
+  // drain waits up to graceMs for running invocations, then cancels their steps (each step's signal
+  // aborts, and no new step starts) and waits at most 5 s more. What's still running is abandoned:
+  // the engine's heartbeat and deadline timers re-dispatch it.
+  async function drain(graceMs: number): Promise<void> {
+    await Promise.race([Promise.allSettled([...active]), sleep(graceMs)])
+    if (active.size === 0) return
+    for (const c of cancels) if (!c.signal.aborted) c.abort(new CancelledError("The worker is stopping"))
+    await Promise.race([Promise.allSettled([...active]), sleep(CANCEL_WAIT_MS)])
+  }
 
   return {
     async run() {

@@ -71,11 +71,14 @@ const racetimeout = workflow("racetimeout", async ({ step }) =>
   Promise.race([step.run("work", () => "work"), step.sleep("limit", "1m").then(() => "limit")]))
 const scheduled = workflow("scheduled", async ({ run }) => run.schedule ?? null)
 const pulled = workflow("pulled", async ({ input, step }) => step.run("compute", () => (input as { x: number }).x * 2))
-const longstep = workflow("longstep", async ({ step }) => step.run("long", async ({ signal }) => {
-  const end = Date.now() + 10_000
-  while (!signal.aborted && Date.now() < end) await new Promise((r) => setTimeout(r, 50))
-  return signal.aborted ? "aborted" : "done"
-}))
+const longstep = workflow("longstep", async ({ step }) => {
+  const l = await step.run("long", async ({ signal }) => {
+    const end = Date.now() + 10_000
+    while (!signal.aborted && Date.now() < end) await new Promise((r) => setTimeout(r, 50))
+    return signal.aborted ? "aborted" : "done"
+  })
+  return step.run("after", () => l)
+})
 const branches = workflow("branches", async ({ step }) => {
   const [a, b] = await Promise.all([
     (async () => { const cb = await step.createCallback("approval", { timeoutMs: 60_000 }); const l = await step.run("log", () => "A"); await cb.wait(); return l })(),
@@ -83,7 +86,11 @@ const branches = workflow("branches", async ({ step }) => {
   ])
   return { a, b }
 })
+const cancelfanout = workflow("cancelfanout", async ({ step }) => {
+  try { await Promise.all([step.run("p0", () => 0), step.run("p1", () => 1)]); return "done" } finally { await step.run("cleanup", () => "cleaned") }
+})
+const toowide = workflow("toowide", async ({ step }) => Promise.all(Array.from({ length: 1001 }, (_, i) => step.run(`s${i}`, () => i))))
 
 // In workflows.md's order (the sync reply's order).
 export const all = [sequence, echo, race, flaky, fatal, slow, sleepy, values, dupe, big, cancellable, caught, explicitid, tuned, effect, coded, widestack, widename, dupeid,
-  approval, approvaltimeout, parent, parentcatch, fanout, racetimeout, scheduled, pulled, longstep, branches]
+  approval, approvaltimeout, parent, parentcatch, fanout, racetimeout, scheduled, pulled, longstep, branches, cancelfanout, toowide]

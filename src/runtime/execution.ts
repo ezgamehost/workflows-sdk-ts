@@ -16,9 +16,15 @@ export interface ExecOptions {
   // The public API base for callback URLs when the invocation carries no endpoints.api.
   apiBaseUrl?: string
   // Aborted when the run is cancelling (a pull worker's heartbeat says so): every running step's
-  // signal aborts with a CancelledError.
+  // signal aborts with a CancelledError, no new step starts, and the invocation ends (the next one
+  // carries the cancel, so cleanup runs there).
   cancelSignal?: AbortSignal
+  // The transport's cap on a result (default 8 MiB, a pull worker's; serve() passes 16 MiB):
+  // a bigger result fails the run non-retriably instead of failing to send on every redispatch.
+  maxResultBytes?: number
 }
+
+const DEFAULT_MAX_RESULT_BYTES = 8 << 20
 
 // The longest sleep: a run times out after a year at most.
 export const MAX_SLEEP_MS = 31_536_000_000
@@ -38,6 +44,17 @@ interface Call {
   fn?: (ctx: StepRunContext) => unknown; retry?: RetryPolicy; timeoutMs?: number; untilMs?: number; produce?: () => unknown
   workflow?: string; input?: unknown
 }
+const NON_RETRIABLE_CODES = new Set(["workflows.non_retriable", "workflows.output_too_large"])
+// inChain: the first error in e's cause chain (e first, at most 8 deep) that matches.
+function inChain(e: unknown, match: (x: object) => boolean): object | undefined {
+  let cur: unknown = e
+  for (let depth = 0; depth < 8 && typeof cur === "object" && cur !== null; depth++) {
+    if (match(cur)) return cur
+    cur = (cur as { cause?: unknown }).cause
+  }
+  return undefined
+}
+
 // replaySeq is where a recorded call settles in replay order: a callback's creation at its
 // createdSeq (protocol 1.1: the entry's seq moves to its completion, where wait() settles), every
 // other call at its entry's seq.
@@ -226,7 +243,14 @@ class Execution {
   }
 
   private end(commands: Command[]): Command[] {
-    return [...this.outbox.splice(0), ...commands]
+    const all = [...this.outbox.splice(0), ...commands]
+    if (this.inv.kind === "step") return all // a step invocation reports at most one 1 MiB output
+    const max = this.opts.maxResultBytes ?? DEFAULT_MAX_RESULT_BYTES
+    let size = 0
+    for (const c of all) size += utf8Length(JSON.stringify(c)) + 1
+    if (size + 1024 > max)
+      return [{ type: "runFailed", error: encodeError(new NonRetriableError(`The invocation's commands are ${size} bytes of JSON, more than the ${max} the transport takes (child inputs and outputs are at most 1 MiB each; start fewer at once)`)) }]
+    return all
   }
 
   private async checkpoint(commands: Command[]): Promise<void> {
@@ -284,10 +308,15 @@ class Execution {
       this.outbox.push({ type: "stepCompleted", stepId: sid, name: c.name, output: value })
       return undefined
     } catch (e) {
-      const retryable = !(e instanceof NonRetriableError || e instanceof OutputTooLarge)
-      const cmd: Command = { type: "stepFailed", stepId: sid, name: c.name, attempt, error: encodeError(e), retryable }
-      if (e instanceof RetryAfterError && typeof e.delayMs === "number" && !Number.isNaN(e.delayMs))
-        cmd.retryAfterMs = Math.min(MAX_RETRY_AFTER_MS, Math.max(0, Math.floor(e.delayMs)))
+      // Classified through the cause chain: a wrapped NonRetriableError (or a non-retriable wire
+      // code) isn't retried, and a wrapped RetryAfterError keeps its delay.
+      const error = encodeError(e)
+      const nonRetriable = inChain(e, (x) => x instanceof NonRetriableError || x instanceof OutputTooLarge || NON_RETRIABLE_CODES.has((x as { code?: unknown }).code as string))
+        || NON_RETRIABLE_CODES.has(error.code)
+      const cmd: Command = { type: "stepFailed", stepId: sid, name: c.name, attempt, error, retryable: !nonRetriable }
+      const ra = inChain(e, (x) => x instanceof RetryAfterError) as RetryAfterError | undefined
+      if (ra && typeof ra.delayMs === "number" && !Number.isNaN(ra.delayMs))
+        cmd.retryAfterMs = Math.min(MAX_RETRY_AFTER_MS, Math.max(0, Math.floor(ra.delayMs)))
       return cmd
     } finally {
       if (timer !== undefined) clearTimeout(timer)
@@ -415,6 +444,9 @@ class Execution {
         .sort((a, b) => replaySeq(a[0], a[1]!) - replaySeq(b[0], b[1]!) || a[0].order - b[0].order)
       if (recorded.length > 0) { this.settleRecorded(recorded[0]![0], recorded[0]![1]!); continue }
       pending.sort((a, b) => a.order - b.order)
+      // The run is cancelling (a pull heartbeat said so): start nothing new and end; the next
+      // invocation carries the cancel, so the workflow's cleanup runs there.
+      if (this.opts.cancelSignal?.aborted) return this.end([])
       if (this.inv.kind === "step") return this.stepInvocation(pending)
       if (this.inv.cancel && !this.cancelThrown) { const c0 = pending[0]!; this.cancelThrown = true; c0.settled = true; c0.reject(new CancelledError("The run was cancelled")); continue }
       if (this.cancelThrown) {
