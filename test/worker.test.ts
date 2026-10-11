@@ -15,6 +15,8 @@ class FakeLive {
   pollAuth: string[] = []
   queue: Invocation[][] = []                  // each poll answer, in order; then 204s
   pollStatus: number[] = []                   // scripted poll statuses before answers
+  retryAfter = "0"                            // their Retry-After
+  pollTimes: number[] = []
   checkpoints: { token: string; body: unknown }[] = []
   checkpointStatus = 204
   heartbeats: string[] = []
@@ -28,9 +30,10 @@ class FakeLive {
     const auth = (init?.headers as Record<string, string>)?.Authorization ?? ""
     if (path === `/v1/organizations/${ORG}/projects/${PROJECT}/workers/poll`) {
       this.polls.push(JSON.parse(String(init!.body)))
+      this.pollTimes.push(Date.now())
       this.pollAuth.push(auth)
       const status = this.pollStatus.shift()
-      if (status !== undefined) return new Response(JSON.stringify({ error: { code: "x", message: "scripted" } }), { status, headers: { "Retry-After": "0" } })
+      if (status !== undefined) return new Response(JSON.stringify({ error: { code: "x", message: "scripted" } }), { status, headers: { "Retry-After": this.retryAfter } })
       const next = this.queue.shift()
       if (!next) {
         // Hold briefly like a long-poll, unless the worker aborts.
@@ -179,6 +182,36 @@ describe("pull worker", () => {
     denied.pollStatus.push(401)
     await expect(worker({ ...base(denied), workflows: [pulled] }).run()).rejects.toBeInstanceOf(WorkerAuthError)
   })
+
+  test("a poll answered 503 with Retry-After: 1 (tasks it couldn't start) waits a second, never hot-loops", async () => {
+    const live = new FakeLive()
+    live.pollStatus.push(503, 503)
+    live.retryAfter = "1"
+    live.queue.push([inv("pulled", "tok-503")])
+    const w = worker({ ...base(live), backoffMaxMs: 30_000, workflows: [pulled] })
+    const running = w.run()
+    await until(() => live.completes.length === 1, 6000)
+    await w.stop()
+    await running
+    expect(live.pollTimes[1]! - live.pollTimes[0]!).toBeGreaterThanOrEqual(950)
+    expect(live.pollTimes[2]! - live.pollTimes[1]!).toBeGreaterThanOrEqual(950)
+  }, 10_000)
+
+  test("failed polls without Retry-After back off exponentially, with jitter", async () => {
+    const live = new FakeLive()
+    live.pollStatus.push(500, 502, 503)
+    live.retryAfter = ""
+    const w = worker({ ...base(live), backoffMaxMs: 30_000, workflows: [pulled] })
+    const running = w.run()
+    await until(() => live.polls.length >= 4, 8000)
+    await w.stop()
+    await running
+    const gaps = live.pollTimes.slice(1, 4).map((t, i) => t - live.pollTimes[i]!)
+    // 500 ms, 1 s and 2 s, each scaled by a jitter in [0.5, 1)
+    expect(gaps[0]!).toBeGreaterThanOrEqual(240)
+    expect(gaps[1]!).toBeGreaterThanOrEqual(490)
+    expect(gaps[2]!).toBeGreaterThanOrEqual(990)
+  }, 12_000)
 
   test("stop() aborts the waiting poll, lets a running invocation finish within the grace period, then run() resolves", async () => {
     const live = new FakeLive()

@@ -79,3 +79,40 @@ test("503 and 429 are retried after Retry-After with the same Idempotency-Key, t
   const err = await down.get("r").catch((e) => e)
   expect([err.status, err.code, err.retryAfterSeconds]).toEqual([503, "unavailable", 5])
 })
+
+test("schedules: create, get, list, update with the revision, pause, resume, delete, trigger", async () => {
+  const calls: { method: string; path: string; body?: unknown; headers: Record<string, string> }[] = []
+  const sched = { id: "s1", resourceName: "r", appId: "a1", workflow: "w", name: "n", cron: "* * * * *", timeZone: "UTC", overlap: "skip",
+    jitterSeconds: 0, catchupWindowSeconds: 3600, paused: false, revision: 3, nextFireAt: null, lastScheduledTime: null, activeRunId: null, missed: 0, skipped: 0, createdAt: "t", updatedAt: "t" }
+  const client = new Client({ apiKey: "k", organizationId: "o", projectId: "p", baseUrl: "https://api.test", fetch: async (url, init) => {
+    const u = new URL(url)
+    calls.push({ method: init!.method!, path: u.pathname + u.search, body: init!.body ? JSON.parse(String(init!.body)) : undefined, headers: init!.headers as Record<string, string> })
+    if (init!.method === "DELETE") return new Response(null, { status: 204 })
+    if (u.pathname.endsWith("/trigger")) return Response.json({ id: "r1", status: "running" }, { status: 201 })
+    if (u.pathname.endsWith("/callbacks/step-1")) return Response.json({ id: "r1", status: "running" })
+    return Response.json(u.pathname.endsWith("/schedules") && init!.method === "GET" ? { schedules: [sched], nextCursor: null } : sched)
+  } })
+  await client.createSchedule({ appId: "a1", workflow: "w", name: "n", cron: "* * * * *" })
+  await client.getSchedule("s1")
+  await client.listSchedules({ limit: 10 })
+  await client.updateSchedule("s1", { cron: "0 * * * *" }, { revision: 3 })
+  await client.pauseSchedule("s1"); await client.resumeSchedule("s1"); await client.deleteSchedule("s1")
+  await client.triggerSchedule("s1", { idempotencyKey: "trig-1" })
+  await client.completeCallback("r1", "step-1", { ok: true })
+  const base = "/v1/organizations/o/projects/p"
+  expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+    `POST ${base}/schedules`, `GET ${base}/schedules/s1`, `GET ${base}/schedules?limit=10`, `PATCH ${base}/schedules/s1`,
+    `POST ${base}/schedules/s1/pause`, `POST ${base}/schedules/s1/resume`, `DELETE ${base}/schedules/s1`,
+    `POST ${base}/schedules/s1/trigger`, `POST ${base}/runs/r1/callbacks/step-1`,
+  ])
+  expect(calls[3]!.headers["If-Match"]).toBe('"3"')
+  expect(calls[7]!.headers["Idempotency-Key"]).toBe("trig-1")
+  expect(calls[8]!.body).toEqual({ ok: true })
+})
+
+test("createApp creates pull apps", async () => {
+  let body: unknown
+  const client = new Client({ apiKey: "k", organizationId: "o", projectId: "p", fetch: async (_u, init) => { body = JSON.parse(String(init!.body)); return Response.json({ app: {}, signingSecret: null }, { status: 201 }) } })
+  await client.createApp("jobs", { kind: "pull", queue: "jobs", partitions: 2 })
+  expect(body).toEqual({ name: "jobs", kind: "pull", queue: "jobs", partitions: 2 })
+})

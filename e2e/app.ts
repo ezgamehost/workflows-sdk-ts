@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync } from "node:fs"
 import { NonRetriableError, serve, workflow } from "@ezgh/workflows"
 
 const STATE = process.env.E2E_STATE ?? "/tmp/workflows-e2e-state.json"
-type State = { fixed: boolean; prepare: number; cleanup: number }
+type State = { fixed: boolean; prepare: number; cleanup: number; callbackUrl?: string }
 const read = (): State => { try { return JSON.parse(readFileSync(STATE, "utf8")) as State } catch { return { fixed: false, prepare: 0, cleanup: 0 } } }
 const bump = (k: "prepare" | "cleanup") => { const s = read(); s[k]++; writeFileSync(STATE, JSON.stringify(s)) }
 const attemptOf = (key: string) => Number(key.split(":").at(-1))
@@ -39,8 +39,23 @@ const exact = workflow("e2e-exact", async ({ step }) => {
   return step.run("echo", () => v)
 })
 
+// Phase 2 (protocol 1.1): a callback, a parent and child, a parallel fan-out and a scheduled run.
+const approval = workflow("e2e-approval", async ({ step }) => {
+  const cb = await step.createCallback("approval", { timeoutMs: 120_000 })
+  await step.run("publish", () => { const s = read(); s.callbackUrl = cb.url; writeFileSync(STATE, JSON.stringify(s)); return true })
+  return cb.wait()
+})
+const child = workflow("e2e-child", async ({ input, step }) => step.run("times-ten", () => (input as { n: number }).n * 10))
+const parent = workflow("e2e-parent", async ({ input, step }) => {
+  const v = (await step.invoke("child", { workflow: "e2e-child", input })) as number
+  return step.run("plus-one", () => v + 1)
+})
+const fanout = workflow("e2e-fanout", async ({ step }) =>
+  ((await Promise.all([0, 1, 2, 3, 4].map((i) => step.run(`part-${i}`, async () => { await new Promise((r) => setTimeout(r, 200)); return i })))) as number[]).reduce((a, b) => a + b, 0))
+const scheduled = workflow("e2e-scheduled", async ({ run, step }) => step.run("note", () => run.schedule ?? null))
+
 const handler = serve({
-  workflows: [complete, sleepy, retry, crash, cancel, fixable, exact],
+  workflows: [complete, sleepy, retry, crash, cancel, fixable, exact, approval, child, parent, fanout, scheduled],
   signingSecrets: [process.env.EZGH_WORKFLOWS_SIGNING_SECRET!], maxInvocationSeconds: 60, deployment: "e2e",
 })
 Bun.serve({

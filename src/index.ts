@@ -6,7 +6,7 @@ export { NonRetriableError, RetryAfterError, CancelledError, WorkflowError, Call
 export { serve } from "./serve.ts"
 export type { ServeOptions } from "./serve.ts"
 export { Client, WorkflowsApiError } from "./client.ts"
-export type { App, AppWithSecret, AppWorkflow, ClientOptions, Run, RunEvent, RunStatus, RunStep } from "./client.ts"
+export type { App, AppWithSecret, AppWorkflow, ClientOptions, Run, RunEvent, RunStatus, RunStep, Schedule, ScheduleInput, ScheduleSummary, ScheduleUpdate } from "./client.ts"
 export type { FetchLike } from "./runtime/live.ts"
 export type { RetryPolicy, ScheduleInfo } from "./protocol/types.ts"
 export { worker, devQueue, WorkerAuthError, WorkerConfigError } from "./worker.ts"

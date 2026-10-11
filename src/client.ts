@@ -24,7 +24,29 @@ export interface App {
   workflows: AppWorkflow[]; maxInvocationSeconds: number | null; protocolVersion: string | null
   sdk: SDKInfo | null; deployment: string | null; health: string; lastSyncAt: string | null
   createdAt: string; updatedAt: string
+  // A pull app's task queue and partition count; null for push apps.
+  queue?: string | null; partitions?: number | null
 }
+// Schedules: cron schedules that start runs of one workflow. A schedule never shows its input
+// (hasInput says whether it has one; scheduleInput reads it).
+export interface Schedule {
+  id: string; resourceName: string; appId: string; workflow: string; name: string
+  cron: string; timeZone: string; overlap: "skip" | "allow" | "bufferOne" | (string & {})
+  jitterSeconds: number; catchupWindowSeconds: number; paused: boolean; revision: number
+  nextFireAt: string | null; nextScheduledTime: string | null; lastScheduledTime: string | null; activeRunId: string | null
+  missed: number; skipped: number; hasInput: boolean; createdAt: string; updatedAt: string
+}
+// A schedule in a list (from the project's index, about a second behind).
+export interface ScheduleSummary {
+  id: string; resourceName: string; appId: string; workflow: string; name: string
+  cron: string; timeZone: string; paused: boolean; revision: number; updatedAt: string
+}
+export interface ScheduleInput {
+  appId: string; workflow: string; name: string; cron: string; timeZone?: string; input?: unknown
+  overlap?: "skip" | "allow" | "bufferOne"; jitterSeconds?: number; catchupWindowSeconds?: number; paused?: boolean
+}
+// What updateSchedule may change: anything but the app and paused (pause and resume do that).
+export type ScheduleUpdate = Partial<Omit<ScheduleInput, "appId" | "paused">>
 // A new or rotated signing secret is returned once; an Idempotency-Key replay answers null.
 export interface AppWithSecret { app: App; signingSecret: string | null }
 
@@ -73,8 +95,8 @@ export class Client {
 
   // call sends one request, retrying 429, 503 and (unless resendOnNetworkError is false) network
   // errors with the same Idempotency-Key.
-  private async call<T>(method: string, path: string, body?: unknown, idempotencyKey?: string, resendOnNetworkError = true): Promise<T> {
-    const headers: Record<string, string> = { Authorization: `Bearer ${this.#apiKey}`, Accept: "application/json" }
+  private async call<T>(method: string, path: string, body?: unknown, idempotencyKey?: string, resendOnNetworkError = true, extraHeaders: Record<string, string> = {}): Promise<T> {
+    const headers: Record<string, string> = { Authorization: `Bearer ${this.#apiKey}`, Accept: "application/json", ...extraHeaders }
     if (body !== undefined) headers["Content-Type"] = "application/json"
     if (method !== "GET") headers["Idempotency-Key"] = idempotencyKey ?? crypto.randomUUID()
     const retries = this.#retries
@@ -105,8 +127,9 @@ export class Client {
   // Apps
   // createApp returns the app and its signing secret, once. A network error isn't resent (the
   // replay of a created app answers signingSecret: null): it throws outcome_unknown.
-  createApp(name: string, opts: { endpoint?: string; idempotencyKey?: string } = {}): Promise<AppWithSecret> {
-    return this.call("POST", "/apps", { name, kind: "push", ...(opts.endpoint ? { endpoint: opts.endpoint } : {}) }, opts.idempotencyKey, false)
+  createApp(name: string, opts: { endpoint?: string; kind?: "push" | "pull"; queue?: string; partitions?: number; idempotencyKey?: string } = {}): Promise<AppWithSecret> {
+    const kind = opts.kind ?? "push"
+    return this.call("POST", "/apps", { name, kind, ...(opts.endpoint ? { endpoint: opts.endpoint } : {}), ...(opts.queue ? { queue: opts.queue } : {}), ...(opts.partitions !== undefined ? { partitions: opts.partitions } : {}) }, opts.idempotencyKey, false)
   }
   getApp(appId: string): Promise<App> { return this.call("GET", `/apps/${id(appId)}`) }
   // sync asks EZGH to call the app's endpoint and record its workflows; run it after each deploy.
@@ -142,4 +165,38 @@ export class Client {
     const qs = q.toString()
     return this.call("GET", `/runs/${id(runId)}/events${qs ? `?${qs}` : ""}`)
   }
+
+  // Schedules: cron schedules that start runs of one workflow (design-phase-2 "Schedules"), with
+  // the workflows.schedules.* actions.
+  createSchedule(input: ScheduleInput, opts: { idempotencyKey?: string } = {}): Promise<Schedule> { return this.call("POST", "/schedules", input, opts.idempotencyKey) }
+  getSchedule(scheduleId: string): Promise<Schedule> { return this.call("GET", `/schedules/${id(scheduleId)}`) }
+  listSchedules(opts: { cursor?: string; limit?: number } = {}): Promise<{ schedules: ScheduleSummary[]; nextCursor: string | null }> {
+    const q = new URLSearchParams()
+    if (opts.cursor) q.set("cursor", opts.cursor)
+    if (opts.limit !== undefined) q.set("limit", String(opts.limit))
+    const qs = q.toString()
+    return this.call("GET", `/schedules${qs ? `?${qs}` : ""}`)
+  }
+  // updateSchedule changes the given fields. revision is the schedule's revision you read
+  // (If-Match): a change since then answers 412.
+  updateSchedule(scheduleId: string, patch: ScheduleUpdate, opts: { revision: number }): Promise<Schedule> {
+    return this.call("PATCH", `/schedules/${id(scheduleId)}`, patch, undefined, true, { "If-Match": `"${opts.revision}"` })
+  }
+  pauseSchedule(scheduleId: string): Promise<Schedule> { return this.call("POST", `/schedules/${id(scheduleId)}/pause`, {}) }
+  // resumeSchedule fires again from now, with no catch-up.
+  resumeSchedule(scheduleId: string): Promise<Schedule> { return this.call("POST", `/schedules/${id(scheduleId)}/resume`, {}) }
+  async deleteSchedule(scheduleId: string): Promise<void> { await this.call("DELETE", `/schedules/${id(scheduleId)}`) }
+  // triggerSchedule starts a run now. The Idempotency-Key names the run, so the same key always
+  // answers the same run (without one, each call starts a new run).
+  triggerSchedule(scheduleId: string, opts: { idempotencyKey?: string } = {}): Promise<Run> { return this.call("POST", `/schedules/${id(scheduleId)}/trigger`, {}, opts.idempotencyKey) }
+  // The input every run of the schedule gets (workflows.runs.getPayload); null when none.
+  scheduleInput(scheduleId: string): Promise<unknown> { return this.call("GET", `/schedules/${id(scheduleId)}/payloads/input`) }
+
+  // Callbacks
+  // completeCallback completes a waiting callback as an authenticated caller
+  // (workflows.callbacks.complete, in the workflows:runs scope) and answers the run. The first
+  // completion wins: the same value again succeeds, a different one is 409 callback_completed,
+  // and after the timeout or the run's end it's 410 callback_expired. The public alternative is
+  // POSTing the value to the callback's URL.
+  completeCallback(runId: string, stepId: string, value: unknown): Promise<Run> { return this.call("POST", `/runs/${id(runId)}/callbacks/${id(stepId)}`, value === undefined ? null : value) }
 }

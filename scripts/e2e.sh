@@ -55,11 +55,13 @@ wait_for http://127.0.0.1:4100/health
 .bin/workflows-stack all > .bin/stack.log 2>&1 & stack_pid=$!; pids+=($stack_pid)
 wait_for http://127.0.0.1:6100/ready "$stack_pid" || { tail -n 200 .bin/stack.log; exit 1; }
 
-read -r E2E_APP_ID EZGH_WORKFLOWS_SIGNING_SECRET < <(bun e2e/setup.ts) || { tail -n 100 .bin/stack.log; exit 1; }
-export E2E_APP_ID EZGH_WORKFLOWS_SIGNING_SECRET
+read -r E2E_APP_ID EZGH_WORKFLOWS_SIGNING_SECRET E2E_PULL_APP_ID < <(bun e2e/setup.ts) || { tail -n 100 .bin/stack.log; exit 1; }
+export E2E_APP_ID EZGH_WORKFLOWS_SIGNING_SECRET E2E_PULL_APP_ID
 
 # The app runs under a supervisor: e2e-crash exits it mid-step on purpose.
 ( while true; do PORT=3200 bun e2e/app.ts || true; sleep 0.2; done ) & pids+=($!)
 wait_for http://127.0.0.1:3200/__e2e/state
+# The pull worker for the pull app (e2e-pulled).
+bun e2e/worker.ts > .bin/worker.log 2>&1 & pids+=($!)
 
 bun e2e/run.ts || { echo "--- stack log"; tail -n 300 .bin/stack.log; exit 1; }

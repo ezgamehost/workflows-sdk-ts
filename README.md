@@ -165,12 +165,34 @@ and 503 answers after `Retry-After` (default 3 retries, at most 10 s apart) with
 | Methods | Credential |
 | --- | --- |
 | `start`, `get`, `cancel`, `retry`, `output`, `input`, `stepOutput`, `events` | an EZGH API key with the `workflows.runs.*` actions it uses, or an EZGH SSO token with the `workflows:runs` scope |
+| `completeCallback` | `workflows.callbacks.complete`, which the `workflows:runs` scope includes |
 | `createApp`, `getApp`, `sync`, `rotateSecret` | an EZGH API key with the `workflows.apps.*` actions it uses |
+| `createSchedule`, `getSchedule`, `listSchedules`, `updateSchedule`, `pauseSchedule`, `resumeSchedule`, `deleteSchedule`, `triggerSchedule` | an EZGH API key with the `workflows.schedules.*` actions it uses (create, update of the workflow, resume and trigger also need `workflows.runs.start` on the workflow) |
 
 `createApp` and `rotateSecret` return the signing secret once, so they aren't resent after a
 network error (a replay would answer `signingSecret: null`): they throw `WorkflowsApiError` with
 status 0 and code `outcome_unknown`. Check the app with `getApp`, and rotate its secret if you
 didn't receive one.
+
+**Pull apps:** `createApp(name, { kind: "pull", queue, partitions })` creates an app for
+[pull workers](#pull-workers); its partitions (1–32, default 4) may grow later but never shrink.
+
+**Schedules** start runs of one workflow on a cron expression (5 fields or `@hourly`, `@daily`,
+`@weekly`, `@monthly`, `@yearly`; at most once a minute) in an IANA time zone (default `UTC`):
+
+```ts
+const s = await client.createSchedule({ appId, workflow: "nightly-report", name: "nightly", cron: "0 2 * * *", timeZone: "Europe/Berlin" })
+await client.updateSchedule(s.id, { cron: "30 2 * * *" }, { revision: s.revision }) // 412 if it changed since
+await client.triggerSchedule(s.id, { idempotencyKey: "rerun-2026-10-10" })          // a run now; the key names it
+await client.pauseSchedule(s.id); await client.resumeSchedule(s.id); await client.deleteSchedule(s.id)
+```
+
+Options: `overlap` (`skip`, the default, `allow` or `bufferOne`), `jitterSeconds` (0–3,600),
+`catchupWindowSeconds` (default 3,600, at most 86,400) and `input` (JSON, at most 1 MiB). A run a
+schedule started sees `run.schedule` (`{ id, scheduledTime }`).
+
+**Callbacks** can also be completed by an authenticated caller: `completeCallback(runId, stepId,
+value)` answers the run.
 
 ## Semantics
 
@@ -232,7 +254,13 @@ at `.workflows-stack-rev` (it reads the internal workflows-stack repo with the
 `scripts/e2e.sh <workflows-stack checkout>` runs the SDK end to end against the real
 workflows-stack (`workflows-stack all` on Postgres and an S3 fixture, with a fake org-api):
 completion, idempotent start, sleep and payload replay, step retries, a process killed mid-step,
-cancel with cleanup, retry from failure, and exact JSON replay (key order and NUL characters). The CI job `e2e` runs it with the same secret rule.
+cancel with cleanup, retry from failure, exact JSON replay (key order and NUL characters), and
+phase 2: a callback completed over its public URL (repeat and conflicting completions), a parent
+and its child under the derived child run ID, a five-step parallel fan-out, a pull worker
+(`e2e/worker.ts`) announcing and running a pull app's workflow, and a schedule firing a run
+under its derived scheduled run ID, then trigger (idempotent by key), pause and delete. The CI
+job `e2e` runs it with the same secret rule. Against a slow shared database, set
+`E2E_TIME_SCALE` (for example `3`) to stretch every wait; no check changes.
 
 Verified end to end against workflows-stack 0944223 (`scripts/e2e.sh`, run against the shared test
 fixtures; CI job e2e, which runs with the `WORKFLOWS_STACK_DEPLOY_KEY` secret).

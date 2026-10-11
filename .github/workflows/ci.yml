@@ -87,7 +87,7 @@ jobs:
   e2e:
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:18-alpine
@@ -159,5 +159,7 @@ jobs:
       - if: steps.token.outputs.present == 'true'
         run: scripts/e2e.sh .workflows-stack
       - if: failure() && steps.token.outputs.present == 'true'
-        name: stack log
-        run: tail -n 500 .bin/stack.log || true
+        name: stack and worker logs
+        run: |
+          tail -n 500 .bin/stack.log || true
+          echo "--- worker log"; tail -n 200 .bin/worker.log || true
