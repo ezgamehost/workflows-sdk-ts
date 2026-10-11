@@ -208,11 +208,16 @@ class Execution {
       entries.push(...page.entries.map((e) => ({ ...e })))
       complete = page.complete || page.entries.length === 0
     }
-    const refs = entries.filter((e) => e.outputRef)
+    // Pages are read against the run's current state: an entry that changed between fetches comes
+    // back on a later page at its new, higher seq. One entry per step: the highest seq wins.
+    for (const e of entries) {
+      const had = this.journal.get(e.stepId)
+      if (!had || e.seq > had.seq) this.journal.set(e.stepId, e)
+    }
+    const refs = [...this.journal.values()].filter((e) => e.outputRef)
     for (let i = 0; i < refs.length; i += 8)
       await Promise.all(refs.slice(i, i + 8).map(async (e) => { e.output = await this.io.payload(e.outputRef!); delete e.outputRef }))
     if (this.inv.run!.inputRef) this.inv.run = { ...this.inv.run!, input: await this.io.payload(this.inv.run!.inputRef) }
-    for (const e of entries) this.journal.set(e.stepId, e)
   }
 
   private timeLeftOk(): boolean {

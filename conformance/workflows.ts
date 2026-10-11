@@ -76,7 +76,14 @@ const longstep = workflow("longstep", async ({ step }) => step.run("long", async
   while (!signal.aborted && Date.now() < end) await new Promise((r) => setTimeout(r, 50))
   return signal.aborted ? "aborted" : "done"
 }))
+const branches = workflow("branches", async ({ step }) => {
+  const [a, b] = await Promise.all([
+    (async () => { const cb = await step.createCallback("approval", { timeoutMs: 60_000 }); const l = await step.run("log", () => "A"); await cb.wait(); return l })(),
+    (async () => { await step.run("prep", () => "P"); return step.run("log", () => "B") })(),
+  ])
+  return { a, b }
+})
 
 // In workflows.md's order (the sync reply's order).
 export const all = [sequence, echo, race, flaky, fatal, slow, sleepy, values, dupe, big, cancellable, caught, explicitid, tuned, effect, coded, widestack, widename, dupeid,
-  approval, approvaltimeout, parent, parentcatch, fanout, racetimeout, scheduled, pulled, longstep]
+  approval, approvaltimeout, parent, parentcatch, fanout, racetimeout, scheduled, pulled, longstep, branches]

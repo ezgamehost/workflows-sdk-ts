@@ -280,8 +280,8 @@ under its derived scheduled run ID, then trigger (idempotent by key), pause and 
 job `e2e` runs it with the same secret rule. Against a slow shared database, set
 `E2E_TIME_SCALE` (for example `3`) to stretch every wait; no check changes.
 
-Verified end to end against workflows-stack 0944223 (`scripts/e2e.sh`, run against the shared test
-fixtures; CI job e2e, which runs with the `WORKFLOWS_STACK_DEPLOY_KEY` secret).
+Verified end to end against workflows-stack 7205eaf (phase 2): the CI job e2e ran the full suite
+three times, and conformance passed all 53 scenarios, push and pull.
 
 `test/vectors` is a verbatim copy of workflows-stack's `protocol/vectors` at the commit in
 `.workflows-stack-rev`; refresh it with `scripts/sync-vectors.sh <workflows-stack checkout> [<commit>]`.

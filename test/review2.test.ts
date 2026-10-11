@@ -118,3 +118,43 @@ describe("cancel", () => {
     expect(out[0]).toEqual({ type: "stepCompleted", stepId: await sid("cleanup"), name: "cleanup", output: "cleaned" })
   })
 })
+
+describe("journal pages repeat a step that changed between fetches (design-phase-2, Journal pages)", () => {
+  const sequence = workflow("sequence", async ({ input, step }) => {
+    let sum = 0
+    for (let i = 0; i < (input as { n: number }).n; i++) sum += (await step.run("add", () => i)) as number
+    return sum
+  })
+  const run = { id: RUN, workflow: "sequence", input: { n: 2 }, attempt: 1, startedAt: "2026-10-09T12:00:00Z" }
+
+  test("a stepId repeated on a later page at a higher seq: the later copy wins", async () => {
+    const live = new FakeLive()
+    live.pages.push({ complete: true, entries: [await entry("add", 1, 3, { output: 1 })] })
+    const inv = v11("sequence", [await entry("add", 0, 1, { output: 0 }), { seq: 2, stepId: await sid("add", 1), name: "add", kind: "run", status: "running", attempt: 1 }], { run })
+    inv.journal!.complete = false
+    expect(cmds(await execute(inv, sequence, live))).toEqual([{ type: "runCompleted", output: 1 }])
+    expect(live.checkpoints).toEqual([])
+  })
+
+  test("copies arriving out of seq order: the highest seq wins, not the last one read", async () => {
+    const live = new FakeLive()
+    live.pages.push({ complete: true, entries: [{ seq: 2, stepId: await sid("add", 1), name: "add", kind: "run", status: "running", attempt: 1 }] })
+    const inv = v11("sequence", [await entry("add", 0, 1, { output: 0 }), await entry("add", 1, 3, { output: 1 })], { run })
+    inv.journal!.complete = false
+    expect(cmds(await execute(inv, sequence, live))).toEqual([{ type: "runCompleted", output: 1 }])
+  })
+
+  test("a callback's copies keep their createdSeq", async () => {
+    const live = new FakeLive()
+    const token = "012." + "A".repeat(43)
+    const approval = await sid("approval")
+    live.pages.push({ complete: true, entries: [{ seq: 4, createdSeq: 1, stepId: approval, name: "approval", kind: "callback", status: "completed", attempt: 1, token, output: { ok: true } }] })
+    const wf = workflow("cb", async ({ step }) => { const cb = await step.createCallback("approval"); await step.run("notify", () => 1); return cb.wait() })
+    const inv = v11("cb", [
+      { seq: 1, createdSeq: 1, stepId: approval, name: "approval", kind: "callback", status: "waiting", attempt: 1, token },
+      await entry("notify", 0, 2, { output: 1 }),
+    ])
+    inv.journal!.complete = false
+    expect(cmds(await execute(inv, wf, live))).toEqual([{ type: "runCompleted", output: { ok: true } }])
+  })
+})
