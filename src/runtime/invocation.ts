@@ -27,6 +27,8 @@ export function parseInvocation(text: string): Invocation {
     for (const e of journal.entries as unknown[])
       if (!isObject(e) || typeof e.seq !== "number" || typeof e.stepId !== "string" || typeof e.status !== "string")
         throw new InvalidInvocation("A journal entry needs seq, stepId and status")
+      else if (e.createdSeq !== undefined && !(Number.isInteger(e.createdSeq) && (e.createdSeq as number) >= 1))
+        throw new InvalidInvocation("A journal entry's createdSeq is an integer ≥ 1")
     if (typeof inv.token !== "string" || inv.token === "" || !isObject(inv.endpoints) || typeof inv.endpoints.live !== "string")
       throw new InvalidInvocation("Missing token or endpoints.live")
     if (inv.kind === "step" && (typeof inv.targetStepId !== "string" || inv.targetStepId === ""))
