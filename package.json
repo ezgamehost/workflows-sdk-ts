@@ -41,7 +41,8 @@
     "smoke": "node scripts/smoke.mjs",
     "check": "bun run typecheck && bun test && bun run build && bun run smoke && npm pack --dry-run",
     "prepack": "npm run build",
-    "types-compat": "scripts/types-compat.sh"
+    "types-compat": "scripts/types-compat.sh",
+    "prepare": "npm run build"
   },
   "devDependencies": {
     "@types/bun": "1.4.2",

@@ -7,10 +7,12 @@ it left off. Your code runs on your own HTTPS endpoint (Node, Bun, Deno, Cloudfl
 Next.js), and EZGH pushes signed invocations to it.
 
 ```sh
-npm i @ezgh/workflows
+npm i github:ezgamehost/workflows-sdk-ts#v0.1.0
 ```
 
 **Status:** pre-release, not published to npm yet (publishing is an open question in the design).
+Install it from GitHub by tag or commit, as above: npm builds the package as it installs it (the
+`prepare` script), so the install takes a few seconds longer. It imports as `@ezgh/workflows`.
 
 ## Quick start
 
