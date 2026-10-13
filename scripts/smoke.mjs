@@ -12,7 +12,7 @@ const body = new TextEncoder().encode('{"a":1}')
 const t = new Date(1791547200 * 1000)
 assert.equal(await protocol.sign([key], t, body), "t=1791547200,v1=9d78a93e4b31945c5c8a6b811ab91c1225ffa28a8e900dca9a5f877803388bc2")
 await protocol.verify(await protocol.sign([key], t, body), [key], body, t)
-for (const name of ["workflow", "serve", "Client"]) if (name in root) assert.equal(typeof root[name], "function")
+for (const name of ["workflow", "serve", "Client", "QueuesClient"]) if (name in root) assert.equal(typeof root[name], "function")
 // serve() under Node: a signed sync, then an orchestrate invocation against a fake workflows-live.
 const secret = "whsec_AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA"
 const hello = root.workflow("hello", async ({ step }) => step.run("greet", () => "hi"))

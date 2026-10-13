@@ -116,6 +116,48 @@ const report = await step.invoke("report", { workflow: buildReport, input: { mon
 
 A run a schedule started sees `run.schedule` (`{ id, scheduledTime }`, the cron instant).
 
+## Sending to a queue
+
+`step.sendToQueue(name, client, queueId, messages)` sends 1–10 messages to an
+[EZGH Queues](https://ezghcloud.com) queue in a step, and resolves with the recorded result
+(`{ messages: [{ messageId, seq?, duplicate? }] }`, one per message, in order). It's `step.run`
+around `client.send`, so a replay returns the result without sending again. The client is a
+`QueuesClient` with your own API key (it needs `queues.messages.send` on the queue): push apps
+hold no API key, so the step never borrows a credential.
+
+```ts
+import { QueuesClient, workflow } from "@ezgh/workflows"
+
+const queues = new QueuesClient({ apiKey, organizationId, projectId }) // baseUrl: https://queues-api.ezghcloud.com
+
+const order = workflow("order", async ({ input, step }) => {
+  const placed = await step.run("place", () => shop.place(input))
+  await step.sendToQueue("notify", queues, "que_…", [
+    { body: JSON.stringify(placed), attributes: { orderId: placed.id }, groupId: placed.accountId },
+  ])
+})
+```
+
+- **Sent once.** Every attempt of the step sends the `Idempotency-Key`
+  `wfq_<hex(SHA-256(runId + ":" + stepId))>`, which the Queues API honors for 48 hours: an attempt
+  that resends after a crash (between the send and the step's record) gets the first answer
+  instead of a second copy, on standard and FIFO queues alike. So keep `messages` deterministic:
+  the same key with a different body is a `409 idempotency_conflict`.
+- **FIFO dedup IDs.** A message with a `groupId` (a FIFO queue's message) and no `dedupId` of
+  its own is sent with `dedupId` `<that hex>:<index>`; FIFO queues also drop a repeat within
+  their 5-minute window. Messages without a `groupId` are sent as they are, since standard queues
+  refuse `dedupId`.
+- **Errors.** The client resends a 429 (but not `quota_exceeded`), any 5xx, a 409
+  `idempotency_in_progress` and network errors after `Retry-After` (default 3 resends, at most
+  10 s apart, `retries` and `maxRetryDelayMs` to change), then throws `QueuesApiError` with the
+  HTTP `status`, the platform `code` and `retryAfterSeconds`. In the step, what's still failing is
+  retried by the step's retry policy, but another 4xx (a bad message, a missing queue, a refused
+  permission) fails the step at once: `NonRetriableError` with the `QueuesApiError` as its
+  `cause`.
+
+`client.send(queueId, messages, { idempotencyKey? })` works outside workflows too (without a key,
+each call gets a random one, kept across its resends).
+
 Parallel steps, callbacks and child workflows need a workflows-stack serving protocol 1.1. An
 invocation at protocol 1.0 runs steps one after another, and `createCallback` and `invoke` fail
 the run with `NonRetriableError`.

@@ -5,6 +5,7 @@ import { utf8Length } from "../protocol/bytes.ts"
 import type { Callback, Step, StepRunContext, StepRunOptions, WorkflowContext } from "./context.ts"
 import { CancelledError, DuplicateStepName, NonRetriableError, OutputTooLarge, RetryAfterError, StepTimeout, decodeError, encodeError } from "./errors.ts"
 import type { LiveIO } from "./live.ts"
+import { QueuesApiError, sendToQueueDigest, withDedupIds } from "../queues.ts"
 import { checkTimeout, definitionOf, mergeRetry, type Workflow, type WorkflowDefinition } from "./workflow.ts"
 
 export interface ExecOptions {
@@ -203,6 +204,25 @@ class Execution {
           }
         } catch (e) { return quiet(Promise.reject(e)) }
         return self.register("invoke", name, opts.id, { workflow, ...(input !== undefined ? { input } : {}) }) as never
+      },
+      sendToQueue(name, client, queueId, messages) {
+        try {
+          if (typeof client?.send !== "function") throw new TypeError("step.sendToQueue needs a QueuesClient")
+          if (typeof queueId !== "string" || queueId === "") throw new TypeError("step.sendToQueue needs a queueId")
+          if (!Array.isArray(messages) || messages.length < 1 || messages.length > 10) throw new TypeError("step.sendToQueue takes 1 to 10 messages")
+        } catch (e) { return quiet(Promise.reject(e)) }
+        return step.run(name, async ({ idempotencyKey }) => {
+          // idempotencyKey is `${runId}:${stepId}:${attempt}`: without the attempt, it's the same
+          // on every attempt of this step (and different for every other step and run).
+          const digest = await sendToQueueDigest(self.inv.run!.id, idempotencyKey.slice(self.inv.run!.id.length + 1, idempotencyKey.lastIndexOf(":")))
+          try {
+            return await client.send(queueId, withDedupIds(messages, digest), { idempotencyKey: `wfq_${digest}` })
+          } catch (e) {
+            if (e instanceof QueuesApiError && e.status >= 300 && e.status < 500 && e.status !== 408 && e.status !== 429 && !(e.status === 409 && e.code === "idempotency_in_progress"))
+              throw new NonRetriableError(`Sending to the queue ${queueId} was refused: ${e.status} ${e.code}: ${e.message}`, { cause: e })
+            throw e
+          }
+        }) as Promise<never>
       },
       idempotencyKey() {
         if (!self.currentKey) throw new Error("idempotencyKey() is only available inside step.run")

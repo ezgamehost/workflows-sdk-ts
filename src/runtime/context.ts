@@ -1,4 +1,5 @@
 import type { RetryPolicy } from "../protocol/index.ts"
+import type { QueueMessageInput, QueuesClient, SentMessages } from "../queues.ts"
 import type { Workflow } from "./workflow.ts"
 
 // Jsonify<T> is T after a JSON round trip: what a step's result is, live and on replay.
@@ -45,6 +46,12 @@ export interface Step {
   // Starts a child run of a workflow in the same app and waits for it (protocol 1.1); resolves
   // with its output, or rejects with ChildFailed (cause: the child's error).
   invoke<I = unknown, O = unknown>(name: string, opts: InvokeOptions<I, O>): Promise<Jsonify<O>>
+  // Sends 1–10 messages to an EZGH queue in a step (step.run around client.send), and resolves
+  // with the recorded result. Every attempt sends Idempotency-Key "wfq_" + hex(SHA-256(runId +
+  // ":" + stepId)), and each message with a groupId (FIFO) and no dedupId of its own gets the
+  // dedupId <that hex>:<index>, so the step sends its messages once. A 4xx refusal (other than
+  // 408, 429 and 409 idempotency_in_progress) fails the step without retries.
+  sendToQueue(name: string, client: QueuesClient, queueId: string, messages: QueueMessageInput[]): Promise<SentMessages>
   // Inside step.run: `${runId}:${stepId}:${attempt}`, for idempotent calls to other systems.
   idempotencyKey(): string
 }
