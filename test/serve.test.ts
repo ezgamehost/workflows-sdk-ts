@@ -12,20 +12,31 @@ const liveFetch: typeof fetch = (async (url: string | URL | Request, init?: Requ
 }) as typeof fetch
 const handler = serve({ workflows: [hello], signingSecrets: [SECRET], maxInvocationSeconds: 120, deployment: "dep-1", fetch: liveFetch })
 
-async function post(body: unknown, opts: { secret?: string; at?: Date; h?: (req: Request) => Promise<Response> } = {}) {
+async function post(body: unknown, opts: { secret?: string; at?: Date; h?: (req: Request) => Promise<Response>; headers?: Record<string, string> } = {}) {
   const raw = new TextEncoder().encode(typeof body === "string" ? body : JSON.stringify(body))
   const sig = await sign([decodeSecret(opts.secret ?? SECRET)], opts.at ?? new Date(), raw)
-  return (opts.h ?? handler)(new Request("https://app.test/api/workflows", { method: "POST", body: raw, headers: { "EZGH-Signature": sig, "Content-Type": "application/json" } }))
+  return (opts.h ?? handler)(new Request("https://app.test/api/workflows", { method: "POST", body: raw, headers: { "EZGH-Signature": sig, "Content-Type": "application/json", ...opts.headers } }))
 }
 const base = { protocolVersion: "1.0", invocationId: "inv_aaaaaaaaaaaaaaaaaaaaaaaaaa", token: "tok", endpoints: { live: "https://live.test" }, deadline: new Date(Date.now() + 120_000).toISOString(), cancel: null }
 const run = { id: "0199a3d0-2b3c-7d4e-9f50-6b7c8d9e0f1a", workflow: "hello", attempt: 1, startedAt: "2026-10-09T12:00:00Z" }
 
 describe("serve", () => {
+  test("ctx.traceparent is the push request's traceparent header, exactly as received, and \"\" without it", async () => {
+    const traced = workflow("traced", async ({ traceparent }) => traceparent)
+    const h = serve({ workflows: [traced], signingSecrets: [SECRET], fetch: liveFetch })
+    const tp = "00-0199a3d02b3c7d4e9f506b7c8d9e0f1a-0123456789abcdef-01"
+    const out = async (headers?: Record<string, string>, extra: object = {}) =>
+      ((await (await post({ ...base, kind: "orchestrate", run: { ...run, workflow: "traced" }, journal: { complete: true, entries: [] }, ...extra }, { h, ...(headers ? { headers } : {}) })).json()) as { commands: unknown[] }).commands
+    expect(await out({ traceparent: tp })).toEqual([{ type: "runCompleted", output: tp }])
+    expect(await out()).toEqual([{ type: "runCompleted", output: "" }])
+    // A push invocation's traceparent is the header's: a body field isn't read.
+    expect(await out(undefined, { traceparent: tp })).toEqual([{ type: "runCompleted", output: "" }])
+  })
   test("sync answers the app's workflows", async () => {
     const res = await post({ ...base, kind: "sync" })
     expect(res.status).toBe(200)
     expect(res.headers.get("Content-Type")).toBe("application/json")
-    expect(await res.json()).toEqual({ protocolVersions: ["1.0", "1.1"], sdk: { name: "@ezgh/workflows", version: "0.1.0" }, maxInvocationSeconds: 120, workflows: [{ name: "hello" }], deployment: "dep-1" })
+    expect(await res.json()).toEqual({ protocolVersions: ["1.0", "1.1"], sdk: { name: "@ezgh/workflows", version: "0.2.0" }, maxInvocationSeconds: 120, workflows: [{ name: "hello" }], deployment: "dep-1" })
   })
   test("sync reports workflow defaults", async () => {
     const wf = workflow("tuned", async () => 1, { retry: { maxAttempts: 2, initialMs: 5, maxMs: 10, multiplier: 2 }, timeoutMs: 1000 })
@@ -39,7 +50,7 @@ describe("serve", () => {
     const body = (await res.json()) as { commands: { type: string }[]; sdk: { name: string; version: string }; deployment: string }
     expect(body.commands.map((c) => c.type)).toEqual(["stepCompleted", "runCompleted"])
     expect(body.deployment).toBe("dep-1")
-    expect(body.sdk).toEqual({ name: "@ezgh/workflows", version: "0.1.0" })
+    expect(body.sdk).toEqual({ name: "@ezgh/workflows", version: "0.2.0" })
     expect(checkpoints).toEqual([{ url: "https://live.test/v1/invocations/checkpoint", auth: "Bearer tok", body: expect.objectContaining({ seq: 1 }) }])
   })
   test("an unknown workflow is workflowNotFound", async () => {

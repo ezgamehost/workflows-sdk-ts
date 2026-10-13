@@ -108,6 +108,8 @@ export function serve(opts: ServeOptions): (req: Request) => Promise<Response> {
       if (e instanceof InvalidInvocation) return json(400, { code: "invalid_invocation", message: e.message })
       return json(500, { code: "sdk_error" })
     }
+    // A push request carries the traceparent as a header (only while the setting is on).
+    inv = { ...inv, traceparent: req.headers.get("traceparent") ?? "" }
     if (inv.kind === "sync") {
       const reply: SyncReply = {
         protocolVersions: [...PROTOCOL_VERSIONS], sdk, maxInvocationSeconds: maxSeconds,

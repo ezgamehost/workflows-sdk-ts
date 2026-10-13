@@ -225,6 +225,13 @@ describe("parallel steps", () => {
 })
 
 describe("schedule metadata, cancellation and errors", () => {
+  test("ctx.traceparent is the invocation's traceparent, and \"\" when it's absent or not a string", async () => {
+    const wf = workflow("traced", async ({ traceparent }) => traceparent)
+    const tp = "00-0199a3d02b3c7d4e9f506b7c8d9e0f1a-0123456789abcdef-01"
+    expect(cmds(await execute(v11("traced", [], { traceparent: tp }), wf, new FakeLive()))).toEqual([{ type: "runCompleted", output: tp }])
+    expect(cmds(await execute(v11("traced"), wf, new FakeLive()))).toEqual([{ type: "runCompleted", output: "" }])
+    expect(cmds(await execute(v11("traced", [], { traceparent: 7 as never }), wf, new FakeLive()))).toEqual([{ type: "runCompleted", output: "" }])
+  })
   test("run.schedule is the invocation's schedule, exactly as sent, and absent otherwise", async () => {
     const wf = workflow("scheduled", async ({ run }) => run.schedule ?? null)
     const schedule = { id: "0199a3d0-0000-7012-8000-000000000001", scheduledTime: "2026-10-10T00:00:00Z" }

@@ -7,7 +7,7 @@ it left off. Your code runs on your own HTTPS endpoint (Node, Bun, Deno, Cloudfl
 Next.js), and EZGH pushes signed invocations to it.
 
 ```sh
-npm i github:ezgamehost/workflows-sdk-ts#v0.1.0
+npm i github:ezgamehost/workflows-sdk-ts#v0.2.0
 ```
 
 **Status:** pre-release, not published to npm yet (publishing is an open question in the design).
@@ -119,6 +119,29 @@ A run a schedule started sees `run.schedule` (`{ id, scheduledTime }`, the cron 
 Parallel steps, callbacks and child workflows need a workflows-stack serving protocol 1.1. An
 invocation at protocol 1.0 runs steps one after another, and `createCallback` and `invoke` fail
 the run with `NonRetriableError`.
+
+## Tracing
+
+While the project's Workflows observability setting is on, EZGH sends each invocation a W3C
+`traceparent` (the push request's header, or a pulled invocation's field), and the context exposes
+it exactly as received as `traceparent`. It's `""` while the setting is off, so a parent-based
+sampler never waits for a parent that won't arrive. The SDK has no OpenTelemetry dependency; with
+`@opentelemetry/api` (and the W3C propagator, which the Node SDK registers by default), parent your
+own spans on it. Start them inside step functions: code outside steps re-runs on every replay.
+
+```ts
+import { context, propagation, trace } from "@opentelemetry/api"
+
+const tracer = trace.getTracer("billing")
+
+const charge = workflow("charge", async ({ input, step, traceparent }) =>
+  step.run("charge-card", () => {
+    const parent = propagation.extract(context.active(), { traceparent })
+    return tracer.startActiveSpan("charge card", {}, parent, async (span) => {
+      try { return await chargeCard(input) } finally { span.end() }
+    })
+  }))
+```
 
 ## Pull workers
 
@@ -294,8 +317,8 @@ under its derived scheduled run ID, then trigger (idempotent by key), pause and 
 job `e2e` runs it with the same secret rule. Against a slow shared database, set
 `E2E_TIME_SCALE` (for example `3`) to stretch every wait; no check changes.
 
-Verified end to end against workflows-stack 830dcb9 (phase 2): the CI job e2e ran the full suite
-three times, and conformance passed all 55 scenarios, push and pull.
+Verified end to end against workflows-stack ec53771: the CI job e2e ran the full suite, and
+conformance passed all 57 scenarios, push and pull.
 
 `test/vectors` is a verbatim copy of workflows-stack's `protocol/vectors` at the commit in
 `.workflows-stack-rev`; refresh it with `scripts/sync-vectors.sh <workflows-stack checkout> [<commit>]`.

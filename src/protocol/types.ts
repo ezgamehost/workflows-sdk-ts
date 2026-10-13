@@ -37,6 +37,9 @@ export interface Invocation {
   targetStepId?: string
   deadline: string
   cancel: Cancel | null
+  // A pulled invocation's W3C traceparent, sent while the project's observability setting is on
+  // (a push request carries it as the traceparent header instead).
+  traceparent?: string
 }
 // One step of a planParallel command: the engine runs each in its own step invocation.
 export interface PlannedStep { stepId: string; name: string; retry: RetryPolicy; timeoutMs?: number }

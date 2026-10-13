@@ -90,7 +90,8 @@ const cancelfanout = workflow("cancelfanout", async ({ step }) => {
   try { await Promise.all([step.run("p0", () => 0), step.run("p1", () => 1)]); return "done" } finally { await step.run("cleanup", () => "cleaned") }
 })
 const toowide = workflow("toowide", async ({ step }) => Promise.all(Array.from({ length: 1001 }, (_, i) => step.run(`s${i}`, () => i))))
+const traced = workflow("traced", async ({ traceparent }) => traceparent)
 
 // In workflows.md's order (the sync reply's order).
 export const all = [sequence, echo, race, flaky, fatal, slow, sleepy, values, dupe, big, cancellable, caught, explicitid, tuned, effect, coded, widestack, widename, dupeid,
-  approval, approvaltimeout, parent, parentcatch, fanout, racetimeout, scheduled, pulled, longstep, branches, cancelfanout, toowide]
+  approval, approvaltimeout, parent, parentcatch, fanout, racetimeout, scheduled, pulled, longstep, branches, cancelfanout, toowide, traced]

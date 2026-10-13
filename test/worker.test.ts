@@ -101,6 +101,20 @@ describe("pull worker", () => {
     ], deployment: "dep-7", sdk: { name: "@ezgh/workflows", version: expect.any(String) } } })
   })
 
+  test("ctx.traceparent is the pulled invocation's traceparent field, and \"\" without it", async () => {
+    const live = new FakeLive()
+    const tp = "00-0199a3d02b3c70129f506b7c8d9e0f1a-0123456789abcdef-01"
+    live.queue.push([{ ...inv("traced", "tok-1"), traceparent: tp }, inv("traced", "tok-2", null, "0199a3d0-2b3c-7012-9f50-6b7c8d9e0f1b")])
+    const traced = workflow("traced", async ({ traceparent }) => traceparent)
+    const w = worker({ ...base(live), workflows: [traced], queue: "jobs", maxTasks: 2 })
+    const running = w.run()
+    await until(() => live.completes.length === 2)
+    await w.stop()
+    await running
+    const out = (tok: string) => live.completes.find((c) => c.token === tok)!.result.commands
+    expect(out("tok-1")).toEqual([{ type: "runCompleted", output: tp }])
+    expect(out("tok-2")).toEqual([{ type: "runCompleted", output: "" }])
+  })
   test("never runs more than concurrency invocations, and asks only for free slots", async () => {
     const live = new FakeLive()
     const slow = workflow("slow", async ({ step }) => step.run("wait", async () => { await sleep(80); return 1 }))

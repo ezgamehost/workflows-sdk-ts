@@ -211,7 +211,7 @@ class Execution {
     }
     const run = this.inv.run!
     const schedule = run.schedule && typeof run.schedule === "object" ? { id: run.schedule.id, scheduledTime: run.schedule.scheduledTime } : undefined
-    return { input: run.input, run: { id: run.id, ...(run.runKey ? { runKey: run.runKey } : {}), attempt: run.attempt, ...(schedule ? { schedule } : {}) }, step }
+    return { input: run.input, run: { id: run.id, ...(run.runKey ? { runKey: run.runKey } : {}), attempt: run.attempt, ...(schedule ? { schedule } : {}) }, step, traceparent: typeof this.inv.traceparent === "string" ? this.inv.traceparent : "" }
   }
 
   // load pages the rest of an incomplete journal and fetches offloaded outputs and input, so the

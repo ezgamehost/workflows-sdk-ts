@@ -53,4 +53,8 @@ export interface WorkflowContext<I> {
   // schedule: set on a run a schedule started ({id, scheduledTime}, the cron instant).
   run: { id: string; runKey?: string; attempt: number; schedule?: { id: string; scheduledTime: string } }
   step: Step
+  // The invocation's W3C traceparent, exactly as received (the push request's traceparent header,
+  // or a pulled invocation's traceparent field), while the project's observability setting is on;
+  // "" otherwise. Parent your own spans on it: the SDK has no OpenTelemetry dependency.
+  traceparent: string
 }
