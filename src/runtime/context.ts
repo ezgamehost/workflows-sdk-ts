@@ -28,6 +28,15 @@ export interface CreateCallbackOptions { timeoutMs?: number; id?: string }
 export interface InvokeOptions<I = unknown, O = unknown> { workflow: string | Workflow<I, O>; input?: I; id?: string }
 // What a step function is called with: signal aborts when the step passes its timeoutMs, or when
 // the run is cancelling (a pull worker's heartbeat says so), with a CancelledError reason.
+// A queue message a wait received (protocol 1.2): what step.waitForMessage resolves with.
+// groupId and seq: FIFO queues only.
+export interface ReceivedMessage {
+  messageId: string; body: string; attributes: Record<string, string>; sentAt: string; queueId: string
+  groupId?: string; seq?: string
+}
+// queueId: the queue's ID (a UUID, not its que_ slug). key: the correlation attribute's value the
+// wait waits for (^[A-Za-z0-9_.:-]{1,256}$). timeoutSeconds: 1 to 2,592,000 (30 days).
+export interface WaitForMessageOptions { queueId: string; key: string; timeoutSeconds: number; id?: string }
 export interface StepRunContext { signal: AbortSignal; attempt: number; idempotencyKey: string }
 export interface Step {
   // Runs fn at least once and records its JSON result; on replay the result returns without running fn.
@@ -52,6 +61,10 @@ export interface Step {
   // dedupId <that hex>:<index>, so the step sends its messages once. A 4xx refusal (other than
   // 408, 429 and 409 idempotency_in_progress) fails the step without retries.
   sendToQueue(name: string, client: QueuesClient, queueId: string, messages: QueueMessageInput[]): Promise<SentMessages>
+  // Waits for a message on an EZGH queue (protocol 1.2): the queue's workflow subscription in
+  // resume mode delivers each message whose correlation attribute equals key to every run waiting
+  // on (queueId, key). Resolves with the message, or null once timeoutSeconds pass without one.
+  waitForMessage(name: string, opts: WaitForMessageOptions): Promise<ReceivedMessage | null>
   // Inside step.run: `${runId}:${stepId}:${attempt}`, for idempotent calls to other systems.
   idempotencyKey(): string
 }

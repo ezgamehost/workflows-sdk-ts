@@ -93,7 +93,7 @@ describe("pull worker", () => {
     await w.stop()
     await running
     expect(live.pollAuth[0]).toBe("Bearer ezgh_testkey")
-    expect(live.polls[0]).toEqual({ app: "0199a3c2-0000-7000-8000-00000000a001", queue: "jobs", maxTasks: 3, workerId: "w-1", protocolVersions: ["1.0", "1.1"],
+    expect(live.polls[0]).toEqual({ app: "0199a3c2-0000-7000-8000-00000000a001", queue: "jobs", maxTasks: 3, workerId: "w-1", protocolVersions: ["1.0", "1.1", "1.2"],
       sdk: { name: "@ezgh/workflows", version: expect.any(String) }, workflows: [{ name: "pulled" }] })
     expect(live.checkpoints[0]!.token).toBe("tok-1")
     expect(live.completes[0]).toEqual({ token: "tok-1", result: { commands: [

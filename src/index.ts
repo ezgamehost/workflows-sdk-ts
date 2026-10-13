@@ -1,7 +1,7 @@
 export { SDK_NAME, SDK_VERSION } from "./version.ts"
 export { workflow } from "./runtime/workflow.ts"
 export type { Workflow, WorkflowOptions } from "./runtime/workflow.ts"
-export type { WorkflowContext, Step, StepRunContext, StepRunOptions, Jsonify, Callback, CreateCallbackOptions, InvokeOptions } from "./runtime/context.ts"
+export type { WorkflowContext, Step, StepRunContext, StepRunOptions, Jsonify, Callback, CreateCallbackOptions, InvokeOptions, ReceivedMessage, WaitForMessageOptions } from "./runtime/context.ts"
 export { NonRetriableError, RetryAfterError, CancelledError, WorkflowError, CallbackTimeout, ChildFailed } from "./runtime/errors.ts"
 export { serve } from "./serve.ts"
 export type { ServeOptions } from "./serve.ts"

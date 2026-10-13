@@ -7,7 +7,7 @@ export interface JournalEntry {
   seq: number
   stepId: string
   name: string
-  kind: "run" | "sleep" | "value" | "callback" | "invoke" | (string & {})
+  kind: "run" | "sleep" | "value" | "callback" | "invoke" | "message" | (string & {})
   status: "running" | "retrying" | "completed" | "failed" | "cancelled" | "sleeping" | "waiting" | (string & {})
   attempt: number
   output?: unknown
@@ -18,6 +18,11 @@ export interface JournalEntry {
   // A callback entry's creation position (protocol 1.1): its seq moves to the completion, where
   // wait() settles, and replay settles the creation here.
   createdSeq?: number
+  // A message entry's queue and key (protocol 1.2), and timedOut: the wait's timeout passed before a
+  // message came (status completed, no output).
+  queueId?: string
+  key?: string
+  timedOut?: boolean
 }
 export interface Journal { complete: boolean; entries: JournalEntry[] }
 // A scheduled run's schedule and scheduled time (the cron instant, not the jittered fire time).
@@ -53,6 +58,8 @@ export type Command =
   | { type: "waitForCallback"; stepId: string }
   | { type: "invoke"; stepId: string; name: string; workflow: string; input?: unknown }
   | { type: "planParallel"; steps: PlannedStep[] }
+  | { type: "messageWaitCreated"; stepId: string; name: string; queueId: string; key: string; timeoutMs: number }
+  | { type: "waitForMessage"; stepId: string }
   | { type: "runCompleted"; output: unknown }
   | { type: "runFailed"; error: WireError; causeStepId?: string }
   | { type: "workflowNotFound"; workflow: string }

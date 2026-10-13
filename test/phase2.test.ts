@@ -263,14 +263,14 @@ describe("schedule metadata, cancellation and errors", () => {
 })
 
 describe("sync", () => {
-  test("the sync reply declares protocol 1.0 and 1.1", async () => {
+  test("the sync reply declares protocol 1.0, 1.1 and 1.2", async () => {
     const secret = "whsec_" + "A".repeat(43)
     const handler = serve({ workflows: [workflow("hello", async () => 1)], signingSecrets: [secret] })
     const body = JSON.stringify({ protocolVersion: "1.1", kind: "sync", invocationId: "inv_aaaaaaaaaaaaaaaaaaaaaaaaaa", token: "", endpoints: { live: "https://live.test" }, deadline: new Date(Date.now() + 60_000).toISOString(), cancel: null })
     const bytes = new TextEncoder().encode(body)
     const { decodeSecret } = await import("../src/protocol/index.ts")
     const res = await handler(new Request("https://app.test/", { method: "POST", body: bytes, headers: { "EZGH-Signature": await sign([decodeSecret(secret)], new Date(), bytes) } }))
-    expect(((await res.json()) as { protocolVersions: string[] }).protocolVersions).toEqual(["1.0", "1.1"])
+    expect(((await res.json()) as { protocolVersions: string[] }).protocolVersions).toEqual(["1.0", "1.1", "1.2"])
   })
 })
 

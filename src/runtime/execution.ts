@@ -1,6 +1,7 @@
 import type { Command, Invocation, JournalEntry, PlannedStep, RetryPolicy, WireError } from "../protocol/index.ts"
 import { MAX_PLANNED_STEPS } from "../protocol/validate.ts"
-import { DEFAULT_RETRY, MAX_OUTPUT_BYTES, encodeValue, jsonByteLength, mintCallbackToken, parseDuration, shardOf, stepId, supportsParallel, validStepIdOverride, validWorkflowName } from "../protocol/index.ts"
+import { DEFAULT_RETRY, MAX_OUTPUT_BYTES, encodeValue, jsonByteLength, mintCallbackToken, parseDuration, shardOf, stepId, supportsMessages, supportsParallel, validStepIdOverride, validWorkflowName } from "../protocol/index.ts"
+import { MAX_MESSAGE_TIMEOUT_MS, MESSAGE_KEY, MIN_MESSAGE_TIMEOUT_MS, UUID } from "../protocol/validate.ts"
 import { utf8Length } from "../protocol/bytes.ts"
 import type { Callback, Step, StepRunContext, StepRunOptions, WorkflowContext } from "./context.ts"
 import { CancelledError, DuplicateStepName, NonRetriableError, OutputTooLarge, RetryAfterError, StepTimeout, decodeError, encodeError } from "./errors.ts"
@@ -37,13 +38,13 @@ export const MIN_CALLBACK_TIMEOUT_MS = 1_000
 export const DEFAULT_API_BASE = "https://workflows-api.ezghcloud.com"
 
 // run, sleep, value: phase 1. callback: creating a callback; wait: Callback.wait() (the callback's
-// own step ID); invoke: a child run.
-type Kind = "run" | "sleep" | "value" | "callback" | "wait" | "invoke"
+// own step ID); invoke: a child run; message: a wait for a queue message (protocol 1.2).
+type Kind = "run" | "sleep" | "value" | "callback" | "wait" | "invoke" | "message"
 interface Call {
   order: number; name: string; kind: Kind; id: Promise<string>; stepId?: string; settled: boolean; explicit?: string
   resolve(v: unknown): void; reject(e: unknown): void
   fn?: (ctx: StepRunContext) => unknown; retry?: RetryPolicy; timeoutMs?: number; untilMs?: number; produce?: () => unknown
-  workflow?: string; input?: unknown
+  workflow?: string; input?: unknown; queueId?: string; key?: string
 }
 const NON_RETRIABLE_CODES = new Set(["workflows.non_retriable", "workflows.output_too_large"])
 // inChain: the first error in e's cause chain (e first, at most 8 deep) that matches.
@@ -115,6 +116,8 @@ class Execution {
     // The engine wouldn't understand these at protocol 1.0: the run fails rather than misbehaves.
     if ((kind === "callback" || kind === "invoke") && !this.parallel && !this.fatal)
       this.fatal = encodeError(new NonRetriableError(`step.${kind === "callback" ? "createCallback" : "invoke"} needs protocol 1.1; this invocation is ${this.inv.protocolVersion}`))
+    if (kind === "message" && !supportsMessages(this.inv.protocolVersion) && !this.fatal)
+      this.fatal = encodeError(new NonRetriableError(`step.waitForMessage needs protocol 1.2; this invocation is ${this.inv.protocolVersion}`))
     let id: Promise<string>
     if (explicitId !== undefined) {
       id = Promise.resolve(explicitId)
@@ -224,6 +227,17 @@ class Execution {
           }
         }) as Promise<never>
       },
+      waitForMessage(name, opts) {
+        let timeoutMs: number
+        try {
+          if (typeof opts?.queueId !== "string" || !UUID.test(opts.queueId)) throw new TypeError(`step.waitForMessage needs the queue's ID (a lowercase UUID, not its que_ slug); got ${JSON.stringify(opts?.queueId)}`)
+          if (typeof opts.key !== "string" || !MESSAGE_KEY.test(opts.key)) throw new TypeError(`step.waitForMessage's key matches ^[A-Za-z0-9_.:-]{1,256}$; got ${JSON.stringify(opts.key)}`)
+          timeoutMs = Math.round(Number(opts.timeoutSeconds) * 1000)
+          if (typeof opts.timeoutSeconds !== "number" || !(timeoutMs >= MIN_MESSAGE_TIMEOUT_MS && timeoutMs <= MAX_MESSAGE_TIMEOUT_MS))
+            throw new TypeError("step.waitForMessage's timeoutSeconds is from 1 to 2,592,000 (30 days)")
+        } catch (e) { return quiet(Promise.reject(e)) }
+        return self.register("message", name, opts.id, { queueId: opts.queueId, key: opts.key, timeoutMs }) as never
+      },
       idempotencyKey() {
         if (!self.currentKey) throw new Error("idempotencyKey() is only available inside step.run")
         return self.currentKey
@@ -291,6 +305,7 @@ class Execution {
   private settleRecorded(c: Call, e: JournalEntry): void {
     c.settled = true
     if (c.kind === "callback") return c.resolve(this.callbackOf(c.stepId!, c.name, e.token!))
+    if (e.status === "completed" && c.kind === "message") return c.resolve(e.timedOut ? null : (e.output ?? null))
     if (e.status === "completed") return c.resolve(e.kind === "sleep" ? undefined : (e.output ?? null))
     if (e.status === "cancelled") { this.cancelThrown = true; return c.reject(new CancelledError("The run was cancelled")) }
     const err = decodeError(e.error ?? { code: "user", name: "Error", message: "Step failed" })
@@ -358,6 +373,13 @@ class Execution {
     c.resolve(this.callbackOf(c.stepId!, c.name, token))
   }
 
+  // createMessageWait records the wait (protocol 1.2) in an acknowledged checkpoint; the call stays
+  // pending, and the invocation ends with waitForMessage (plan), as Callback.wait() does.
+  private async createMessageWait(c: Call): Promise<void> {
+    await this.checkpoint([...this.outbox.splice(0), { type: "messageWaitCreated", stepId: c.stepId!, name: c.name, queueId: c.queueId!, key: c.key!, timeoutMs: c.timeoutMs! }])
+    this.journal.set(c.stepId!, { seq: Number.MAX_SAFE_INTEGER, stepId: c.stepId!, name: c.name, kind: "message", status: "waiting", attempt: 1, queueId: c.queueId!, key: c.key! })
+  }
+
   private planned(c: Call): PlannedStep {
     return { stepId: c.stepId!, name: c.name, retry: c.retry!, ...(c.timeoutMs ? { timeoutMs: c.timeoutMs } : {}) }
   }
@@ -393,7 +415,12 @@ class Execution {
           // Sent for every pending wait, even one already waiting: a no-op for the engine.
           if (!waited.has(p.stepId!)) { waited.add(p.stepId!); suspends.push({ type: "waitForCallback", stepId: p.stepId! }) }
           break
-        // value and callback calls are handled when they're the oldest new call.
+        case "message":
+          // A created wait (waiting) suspends, every time; a new one is created first (as the
+          // oldest new call), like a callback.
+          if (e && !waited.has(p.stepId!)) { waited.add(p.stepId!); suspends.push({ type: "waitForMessage", stepId: p.stepId! }) }
+          break
+        // value and callback calls (and new message waits) are handled when they're the oldest new call.
       }
     }
     if (busy === 0 && suspends.length === 0 && runs.length + retrying.length === 1) {
@@ -492,6 +519,10 @@ class Execution {
           if (e instanceof TypeError) { head.settled = true; head.reject(e); continue }
           throw e // InvocationSuperseded, CheckpointFailed: the invocation stops
         }
+        continue
+      }
+      if (head?.kind === "message" && !this.journal.has(head.stepId!)) {
+        await this.createMessageWait(head) // InvocationSuperseded, CheckpointFailed: the invocation stops
         continue
       }
       const next = this.parallel && !this.cancelThrown ? this.plan(pending) : this.sequential(c)

@@ -25,14 +25,18 @@ const STEP_ID = /^[A-Za-z0-9._:-]{1,128}$/
 const PAYLOAD_ID = /^pay_[a-z2-7]{26}$/
 const INVOCATION_ID = /^inv_[a-z2-7]{26}$/
 const WORKFLOW = /^[A-Za-z0-9_-]{1,64}$/
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const QUEUE = /^[a-z0-9][a-z0-9-]{0,62}$/
 const WORKER_ID = /^[A-Za-z0-9._:-]{1,128}$/
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/
 const COMMAND_TYPES = new Set([
   "stepStarted", "stepCompleted", "stepFailed", "valueRecorded", "sleep", "runCompleted", "runFailed",
-  "workflowNotFound", "callbackCreated", "waitForCallback", "invoke", "planParallel",
+  "workflowNotFound", "callbackCreated", "waitForCallback", "invoke", "planParallel", "messageWaitCreated", "waitForMessage",
 ])
+// Message waits (protocol 1.2): the queue's ID, the key, and the timeout (1 s to 30 days).
+export const MESSAGE_KEY = /^[A-Za-z0-9_.:-]{1,256}$/
+export const MIN_MESSAGE_TIMEOUT_MS = 1000
+export const MAX_MESSAGE_TIMEOUT_MS = 2_592_000_000
 
 export class InvalidMessage extends Error { override name = "InvalidMessage" }
 const fail = (msg: string): never => { throw new InvalidMessage(msg) }
@@ -92,6 +96,7 @@ export function validateCommand(cmd: unknown): void {
   if (c.input !== undefined && c.inputRef !== undefined) fail("input and inputRef are exclusive")
   if ((c.input !== undefined || c.inputRef !== undefined) && type !== "invoke") fail(`input on ${type}`)
   if (c.steps !== undefined && type !== "planParallel") fail(`steps on ${type}`)
+  if ((c.queueId !== undefined || c.key !== undefined) && type !== "messageWaitCreated") fail(`queueId or key on ${type}`)
   const step = () => { if (!STEP_ID.test(str(c.stepId)) || !validName(c.name)) fail(`${type} needs stepId and name`) }
   switch (type) {
     case "stepStarted": case "stepFailed":
@@ -125,8 +130,14 @@ export function validateCommand(cmd: unknown): void {
       step()
       if (c.token === undefined || !isInt(c.timeoutMs) || c.timeoutMs < 1) fail("callbackCreated needs token and timeoutMs ≥ 1")
       break
-    case "waitForCallback":
-      if (!STEP_ID.test(str(c.stepId))) fail("waitForCallback needs stepId")
+    case "waitForCallback": case "waitForMessage":
+      if (!STEP_ID.test(str(c.stepId))) fail(`${type} needs stepId`)
+      break
+    case "messageWaitCreated":
+      step()
+      if (!UUID.test(str(c.queueId))) fail("messageWaitCreated needs queueId (a UUID)")
+      if (!MESSAGE_KEY.test(str(c.key))) fail("messageWaitCreated needs key (^[A-Za-z0-9_.:-]{1,256}$)")
+      if (!isInt(c.timeoutMs) || c.timeoutMs < MIN_MESSAGE_TIMEOUT_MS || c.timeoutMs > MAX_MESSAGE_TIMEOUT_MS) fail("messageWaitCreated needs timeoutMs from 1,000 to 2,592,000,000")
       break
     case "invoke":
       step()

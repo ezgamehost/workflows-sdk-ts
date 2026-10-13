@@ -36,7 +36,7 @@ describe("serve", () => {
     const res = await post({ ...base, kind: "sync" })
     expect(res.status).toBe(200)
     expect(res.headers.get("Content-Type")).toBe("application/json")
-    expect(await res.json()).toEqual({ protocolVersions: ["1.0", "1.1"], sdk: { name: "@ezgh/workflows", version: "0.2.0" }, maxInvocationSeconds: 120, workflows: [{ name: "hello" }], deployment: "dep-1" })
+    expect(await res.json()).toEqual({ protocolVersions: ["1.0", "1.1", "1.2"], sdk: { name: "@ezgh/workflows", version: "0.2.0" }, maxInvocationSeconds: 120, workflows: [{ name: "hello" }], deployment: "dep-1" })
   })
   test("sync reports workflow defaults", async () => {
     const wf = workflow("tuned", async () => 1, { retry: { maxAttempts: 2, initialMs: 5, maxMs: 10, multiplier: 2 }, timeoutMs: 1000 })

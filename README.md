@@ -158,6 +158,29 @@ const order = workflow("order", async ({ input, step }) => {
 `client.send(queueId, messages, { idempotencyKey? })` works outside workflows too (without a key,
 each call gets a random one, kept across its resends).
 
+## Waiting for a message
+
+`step.waitForMessage(name, { queueId, key, timeoutSeconds })` suspends the run until a message
+arrives on an EZGH queue for `key`, and resolves with it, or with `null` once `timeoutSeconds` (1
+to 2,592,000, 30 days) pass without one. A timeout isn't an error.
+
+```ts
+const paid = await step.waitForMessage("paid", { queueId: "0199a3d0-…", key: `order:${input.orderId}`, timeoutSeconds: 86_400 })
+if (paid === null) return step.run("cancel-order", () => shop.cancel(input.orderId))
+await step.run("ship", () => shop.ship(input.orderId, JSON.parse(paid.body)))
+```
+
+- **Delivery.** The queue needs a subscription that targets the app's workflow in `resume` mode
+  with a `correlationAttribute` (say `orderId`). Each message whose attribute equals a wait's `key`
+  resumes every run waiting on that queue and key at that moment. A message nobody waits for is
+  retried with the subscription's backoff, then dead-lettered.
+- **The message** is `{ messageId, body, attributes, sentAt, queueId, groupId?, seq? }`
+  (`ReceivedMessage`). It's recorded, so replays return the same one.
+- `queueId` is the queue's ID (a UUID, not its `que_` slug); `key` matches
+  `^[A-Za-z0-9_.:-]{1,256}$`. Cancelling the run throws `CancelledError` from a pending wait.
+- Waits need a workflows-stack serving protocol 1.2; at 1.0 or 1.1 the run fails with
+  `NonRetriableError`.
+
 Parallel steps, callbacks and child workflows need a workflows-stack serving protocol 1.1. An
 invocation at protocol 1.0 runs steps one after another, and `createCallback` and `invoke` fail
 the run with `NonRetriableError`.
@@ -359,8 +382,8 @@ under its derived scheduled run ID, then trigger (idempotent by key), pause and 
 job `e2e` runs it with the same secret rule. Against a slow shared database, set
 `E2E_TIME_SCALE` (for example `3`) to stretch every wait; no check changes.
 
-Verified end to end against workflows-stack ec53771: the CI job e2e ran the full suite, and
-conformance passed all 57 scenarios, push and pull.
+Verified end to end against workflows-stack 0d280ce: the CI job e2e ran the full suite, and
+conformance passed all 61 scenarios (protocol 1.2's message waits included), push and pull.
 
 `test/vectors` is a verbatim copy of workflows-stack's `protocol/vectors` at the commit in
 `.workflows-stack-rev`; refresh it with `scripts/sync-vectors.sh <workflows-stack checkout> [<commit>]`.

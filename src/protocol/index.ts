@@ -9,12 +9,17 @@ export { isInvocationToken, shardOf } from "./tokens.ts"
 
 // The newest protocol version this SDK speaks, and every one it speaks (sync replies and pull polls
 // declare them; the engine picks the newest it shares).
-export const PROTOCOL_VERSION = "1.1"
-export const PROTOCOL_VERSIONS: readonly string[] = Object.freeze(["1.0", "1.1"])
+export const PROTOCOL_VERSION = "1.2"
+export const PROTOCOL_VERSIONS: readonly string[] = Object.freeze(["1.0", "1.1", "1.2"])
 // supportsParallel: protocol 1.1 and later plan parallel steps and allow callbacks and invoke.
 export function supportsParallel(version: string): boolean {
   const [major, minor] = String(version).split(".").map(Number)
   return major === 1 && (minor ?? 0) >= 1
+}
+// supportsMessages: protocol 1.2 and later wait for queue messages (step.waitForMessage).
+export function supportsMessages(version: string): boolean {
+  const [major, minor] = String(version).split(".").map(Number)
+  return major === 1 && (minor ?? 0) >= 2
 }
 export { callbackTokenHash, mintCallbackToken, parseCallbackToken } from "./callback.ts"
 export { childRunId, derivedRunId, rfc3339Nano, scheduledRunId, triggeredRunId } from "./derived.ts"
