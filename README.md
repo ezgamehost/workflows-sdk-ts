@@ -7,7 +7,7 @@ it left off. Your code runs on your own HTTPS endpoint (Node, Bun, Deno, Cloudfl
 Next.js), and EZGH pushes signed invocations to it.
 
 ```sh
-npm i github:ezgamehost/workflows-sdk-ts#v0.2.0
+npm i github:ezgamehost/workflows-sdk-ts#v0.3.0
 ```
 
 **Status:** pre-release, not published to npm yet (publishing is an open question in the design).
@@ -382,7 +382,7 @@ under its derived scheduled run ID, then trigger (idempotent by key), pause and 
 job `e2e` runs it with the same secret rule. Against a slow shared database, set
 `E2E_TIME_SCALE` (for example `3`) to stretch every wait; no check changes.
 
-Verified end to end against workflows-stack 0d280ce: the CI job e2e ran the full suite, and
+Verified end to end against workflows-stack f717543: the CI job e2e ran the full suite, and
 conformance passed all 61 scenarios (protocol 1.2's message waits included), push and pull.
 
 `test/vectors` is a verbatim copy of workflows-stack's `protocol/vectors` at the commit in

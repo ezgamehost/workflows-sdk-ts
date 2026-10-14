@@ -36,7 +36,7 @@ describe("serve", () => {
     const res = await post({ ...base, kind: "sync" })
     expect(res.status).toBe(200)
     expect(res.headers.get("Content-Type")).toBe("application/json")
-    expect(await res.json()).toEqual({ protocolVersions: ["1.0", "1.1", "1.2"], sdk: { name: "@ezgh/workflows", version: "0.2.0" }, maxInvocationSeconds: 120, workflows: [{ name: "hello" }], deployment: "dep-1" })
+    expect(await res.json()).toEqual({ protocolVersions: ["1.0", "1.1", "1.2"], sdk: { name: "@ezgh/workflows", version: "0.3.0" }, maxInvocationSeconds: 120, workflows: [{ name: "hello" }], deployment: "dep-1" })
   })
   test("sync reports workflow defaults", async () => {
     const wf = workflow("tuned", async () => 1, { retry: { maxAttempts: 2, initialMs: 5, maxMs: 10, multiplier: 2 }, timeoutMs: 1000 })
@@ -50,7 +50,7 @@ describe("serve", () => {
     const body = (await res.json()) as { commands: { type: string }[]; sdk: { name: string; version: string }; deployment: string }
     expect(body.commands.map((c) => c.type)).toEqual(["stepCompleted", "runCompleted"])
     expect(body.deployment).toBe("dep-1")
-    expect(body.sdk).toEqual({ name: "@ezgh/workflows", version: "0.2.0" })
+    expect(body.sdk).toEqual({ name: "@ezgh/workflows", version: "0.3.0" })
     expect(checkpoints).toEqual([{ url: "https://live.test/v1/invocations/checkpoint", auth: "Bearer tok", body: expect.objectContaining({ seq: 1 }) }])
   })
   test("an unknown workflow is workflowNotFound", async () => {
