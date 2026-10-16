@@ -1,4 +1,4 @@
-import { serve } from "@ezgh/workflows"
+import { serve } from "@ezghcloud/workflows"
 import { onboarding } from "../../../../workflows.ts"
 
 // Set maxInvocationSeconds to your plan's function limit (Vercel Pro's default is 300 s).

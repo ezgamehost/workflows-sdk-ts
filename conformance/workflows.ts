@@ -1,6 +1,6 @@
 // The conformance workflows (workflows-stack protocol/conformance/workflows.md), shared by the
 // push app (app.ts) and the pull worker (worker.ts).
-import { type CallbackTimeout, NonRetriableError, RetryAfterError, WorkflowError, workflow } from "@ezgh/workflows"
+import { type CallbackTimeout, NonRetriableError, RetryAfterError, WorkflowError, workflow } from "@ezghcloud/workflows"
 
 const sequence = workflow("sequence", async ({ input, step }) => {
   let sum = 0

@@ -1,0 +1,82 @@
+name: Release
+
+# On a vX.Y.Z tag (cut after the version bump in package.json and src/version.ts is committed on
+# main): run CI's check job, pack, publish @ezghcloud/workflows to npm, and create the GitHub
+# release. Publishing uses npm trusted publishing (GitHub Actions OIDC): there is no npm token, and
+# npm adds provenance itself. npm's trust entry names this file, so keep the name release.yml.
+# One-time owner setup: scripts/npm-trust.sh @ezghcloud/workflows. Re-running skips a version
+# that's already on npm and a release that already exists.
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: npm supports trusted publishing (11.5.1 or later)
+        run: |
+          v=$(npm --version)
+          node -e '
+            const [a, b] = [process.argv[1], "11.5.1"].map((s) => s.split(".").map(Number))
+            for (let i = 0; i < 3; i++) if (a[i] !== b[i]) process.exit(a[i] > b[i] ? 0 : 1)
+          ' "$v" || { echo "::error::npm $v is older than 11.5.1, which trusted publishing needs"; exit 1; }
+          echo "npm $v"
+      - run: bun install --frozen-lockfile
+      - name: the tag matches the package version
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          pkg=$(node -p "require('./package.json').version")
+          [ "$pkg" = "$v" ] || { echo "::error::tag $GITHUB_REF_NAME doesn't match package.json version $pkg"; exit 1; }
+      # CI's check job (conformance and e2e need the internal workflows-stack; they ran on main).
+      - run: bun run check
+      - run: scripts/types-compat.sh
+      - run: bun run build
+      - name: pack
+        id: pack
+        run: |
+          mkdir -p .packs
+          npm pack --pack-destination .packs
+          v=$(node -p "require('./package.json').version")
+          tgz=".packs/ezghcloud-workflows-$v.tgz"
+          [ -f "$tgz" ] || { echo "::error::$tgz wasn't produced"; ls -l .packs; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "tgz=$tgz" >> "$GITHUB_OUTPUT"
+      - name: publish to npm
+        env:
+          V: ${{ steps.pack.outputs.version }}
+          TGZ: ${{ steps.pack.outputs.tgz }}
+        run: |
+          if npm view "@ezghcloud/workflows@$V" version >/dev/null 2>&1; then
+            echo "@ezghcloud/workflows@$V is already published"
+          else
+            npm publish "$TGZ" --access public
+          fi
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TGZ: ${{ steps.pack.outputs.tgz }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists"
+          else
+            gh release create "$GITHUB_REF_NAME" "$TGZ" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --verify-tag --generate-notes
+          fi

@@ -1,6 +1,6 @@
 // Creates the e2e push app and pull app through the Client (which retries the cold engine's 503s with the same
 // Idempotency-Key) and prints "<appId> <signingSecret> <pullAppId>".
-import { Client } from "@ezgh/workflows"
+import { Client } from "@ezghcloud/workflows"
 
 const client = new Client({
   apiKey: process.env.E2E_API_KEY!, organizationId: process.env.E2E_ORG!, projectId: process.env.E2E_PROJECT!,

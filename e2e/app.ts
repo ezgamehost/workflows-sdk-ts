@@ -1,7 +1,7 @@
 // The end-to-end app: served on 127.0.0.1:3200 under a supervisor (scripts/e2e.sh), driven by
 // e2e/run.ts through the real workflows-stack.
 import { readFileSync, writeFileSync } from "node:fs"
-import { NonRetriableError, serve, workflow } from "@ezgh/workflows"
+import { NonRetriableError, serve, workflow } from "@ezghcloud/workflows"
 
 const STATE = process.env.E2E_STATE ?? "/tmp/workflows-e2e-state.json"
 type State = { fixed: boolean; prepare: number; cleanup: number; callbackUrl?: string }

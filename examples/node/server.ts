@@ -1,6 +1,6 @@
 import { createServer } from "node:http"
 import { Readable } from "node:stream"
-import { serve } from "@ezgh/workflows"
+import { serve } from "@ezghcloud/workflows"
 import { onboarding } from "../workflows.ts"
 
 const handler = serve({ workflows: [onboarding], signingSecrets: [process.env.EZGH_WORKFLOWS_SIGNING_SECRET] })

@@ -1,4 +1,4 @@
-# @ezgh/workflows
+# @ezghcloud/workflows
 
 The TypeScript SDK for [EZGH Workflows](https://ezghcloud.com): durable workflows as code. You
 write a workflow as an async function whose side effects run in named steps. EZGH records each
@@ -7,19 +7,21 @@ it left off. Your code runs on your own HTTPS endpoint (Node, Bun, Deno, Cloudfl
 Next.js), and EZGH pushes signed invocations to it.
 
 ```sh
-npm i github:ezgamehost/workflows-sdk-ts#v0.3.0
+npm install @ezghcloud/workflows
+# or
+bun add @ezghcloud/workflows
+pnpm add @ezghcloud/workflows
 ```
 
-**Status:** pre-release, not published to npm yet (publishing is an open question in the design).
-Install it from GitHub by tag or commit, as above: npm builds the package as it installs it (the
-`prepare` script), so the install takes a few seconds longer. It imports as `@ezgh/workflows`.
+The package is published to npm from this repository's tags (see [Releasing](#releasing)), with
+npm provenance.
 
 ## Quick start
 
 **1. Define workflows.** Side effects go in named steps; their JSON results are recorded.
 
 ```ts
-import { workflow } from "@ezgh/workflows"
+import { workflow } from "@ezghcloud/workflows"
 
 export const onboarding = workflow("onboarding", async ({ input, step }) => {
   const user = await step.run("load-user", () => db.users.get(input.userId))
@@ -33,7 +35,7 @@ export const onboarding = workflow("onboarding", async ({ input, step }) => {
 when you create the app; pass two during a rotation):
 
 ```ts
-import { serve } from "@ezgh/workflows"
+import { serve } from "@ezghcloud/workflows"
 
 export const POST = serve({ workflows: [onboarding], signingSecrets: [process.env.EZGH_WORKFLOWS_SIGNING_SECRET] })
 ```
@@ -48,7 +50,7 @@ platform's request limit (default 300, at most 900).
 ([example](examples/deploy-sync.ts)):
 
 ```ts
-import { Client } from "@ezgh/workflows"
+import { Client } from "@ezghcloud/workflows"
 
 const client = new Client({ apiKey, organizationId, projectId })
 await client.sync(appId, { endpoint: "https://app.example.com/api/workflows" })
@@ -126,7 +128,7 @@ around `client.send`, so a replay returns the result without sending again. The 
 hold no API key, so the step never borrows a credential.
 
 ```ts
-import { QueuesClient, workflow } from "@ezgh/workflows"
+import { QueuesClient, workflow } from "@ezghcloud/workflows"
 
 const queues = new QueuesClient({ apiKey, organizationId, projectId }) // baseUrl: https://queues-api.ezghcloud.com
 
@@ -219,7 +221,7 @@ pull app (`kind: "pull"`, with a task queue and its partitions), then run a work
 `fetch` (Node, Bun, Deno):
 
 ```ts
-import { worker } from "@ezgh/workflows"
+import { worker } from "@ezghcloud/workflows"
 
 const w = worker({ apiKey, organizationId, projectId, app: pullAppId, workflows: [resize], queue: "default" })
 process.on("SIGTERM", () => void w.stop())
@@ -354,7 +356,7 @@ callback's URL (no credential: the URL's token is one).
 
 The package has no runtime dependencies: it uses Web Crypto and `fetch` only. It's ESM only; in
 TypeScript use `moduleResolution` `bundler`, `node16` or `nodenext` (TypeScript 5.4 or later).
-`@ezgh/workflows/protocol` exports `sign`, `verify`, `decodeSecret`, `SignatureError` and the wire
+`@ezghcloud/workflows/protocol` exports `sign`, `verify`, `decodeSecret`, `SignatureError` and the wire
 types, for checking `EZGH-Signature` headers in a custom transport.
 
 ## Development
@@ -387,6 +389,29 @@ conformance passed all 61 scenarios (protocol 1.2's message waits included), pus
 
 `test/vectors` is a verbatim copy of workflows-stack's `protocol/vectors` at the commit in
 `.workflows-stack-rev`; refresh it with `scripts/sync-vectors.sh <workflows-stack checkout> [<commit>]`.
+
+## Releasing
+
+Releases are published to npm by `.github/workflows/release.yml` with npm trusted publishing
+(GitHub Actions OIDC; there is no npm token, and npm adds provenance automatically).
+
+1. Bump `version` in `package.json` and `SDK_VERSION` in `src/version.ts` to the same `X.Y.Z` (a
+   unit test fails when they differ), and commit on main.
+2. Push the tag: `git tag -a vX.Y.Z -m vX.Y.Z && git push origin vX.Y.Z`.
+
+On the tag, the workflow checks that the tag equals the `package.json` version, runs the same checks
+as CI's `check` job (typecheck, tests, build, Node smoke test, consumer types on TypeScript 5.4 and
+5.6), packs the tarball, publishes it to npm as `@ezghcloud/workflows` (skipped when that version is
+already on npm, so a re-run is safe) and creates the GitHub release with the tarball attached.
+
+First-time owner setup, once, logged in to npm with 2FA (npm 11.15 or later):
+`scripts/npm-trust.sh @ezghcloud/workflows`. npm can only trust an existing package, so it publishes
+a deprecated `0.0.0` placeholder first, then trusts `release.yml` in this repository to publish and
+requires 2FA for manual publishes.
+
+Tags `v0.1.0` to `v0.3.0` predate npm publishing: they were installed from GitHub
+(`npm i github:ezgamehost/workflows-sdk-ts#v0.3.0`, built on install by a `prepare` script, as
+`@ezgh/workflows`). The first npm release is a later version.
 
 ## License
 

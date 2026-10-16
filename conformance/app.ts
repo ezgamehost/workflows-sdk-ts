@@ -1,6 +1,6 @@
 // The conformance app: workflows-stack protocol/conformance/workflows.md, served for
 // cmd/workflows-conformance (scripts/conformance.sh).
-import { serve } from "@ezgh/workflows"
+import { serve } from "@ezghcloud/workflows"
 import { all } from "./workflows.ts"
 
 const handler = serve({ workflows: all, signingSecrets: [process.env.CONFORMANCE_SECRET!], maxInvocationSeconds: 300, deployment: "conformance" })

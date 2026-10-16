@@ -1,5 +1,5 @@
 // Run after each deploy: EZGH calls the app's endpoint and records its workflows.
-import { Client } from "@ezgh/workflows"
+import { Client } from "@ezghcloud/workflows"
 
 const client = new Client({
   apiKey: process.env.EZGH_API_KEY!,

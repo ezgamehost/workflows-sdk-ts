@@ -1,6 +1,6 @@
 // A pull worker: run with EZGH_API_KEY, EZGH_ORG and EZGH_PROJECT set, plus EZGH_PULL_APP in
 // production. In development (NODE_ENV isn't production) it runs on your own dev app instead.
-import { Client, worker, workflow } from "@ezgh/workflows"
+import { Client, worker, workflow } from "@ezghcloud/workflows"
 
 const resize = workflow("resize", async ({ input, step }) => {
   const { url } = input as { url: string }

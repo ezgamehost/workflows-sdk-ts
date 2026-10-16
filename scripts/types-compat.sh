@@ -14,8 +14,8 @@ cat > package.json <<JSON
 { "name": "consumer", "private": true, "type": "module" }
 JSON
 cat > consumer.ts <<'TS'
-import { Client, NonRetriableError, serve, workflow, type Run, type Workflow } from "@ezgh/workflows"
-import { decodeSecret, sign, verify, type Invocation } from "@ezgh/workflows/protocol"
+import { Client, NonRetriableError, serve, workflow, type Run, type Workflow } from "@ezghcloud/workflows"
+import { decodeSecret, sign, verify, type Invocation } from "@ezghcloud/workflows/protocol"
 const wf: Workflow<{ n: number }, number> = workflow("w", async ({ input, step }) => (await step.run("s", ({ signal }) => (signal.aborted ? 0 : (input as { n: number }).n))) as number)
 export const handler: (req: Request) => Promise<Response> = serve({ workflows: [wf], signingSecrets: [undefined] })
 export const key: Uint8Array = decodeSecret("whsec_AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA")

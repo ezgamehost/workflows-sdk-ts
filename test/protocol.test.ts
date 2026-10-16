@@ -3,7 +3,7 @@ import pkg from "../package.json"
 import {
   decodeSecret, encodeValue, isInvocationToken, jsonByteLength, parseDuration, sign, SignatureError, stepId, verify,
 } from "../src/protocol/index.ts"
-import { SDK_VERSION } from "../src/version.ts"
+import { SDK_NAME, SDK_VERSION } from "../src/version.ts"
 
 const secret = decodeSecret("whsec_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8")
 const body = new TextEncoder().encode('{"kind":"sync"}')
@@ -84,3 +84,4 @@ describe("step IDs and tokens", () => {
 })
 
 test("SDK_VERSION matches package.json", () => expect(SDK_VERSION).toBe(pkg.version))
+test("SDK_NAME matches package.json", () => expect(SDK_NAME).toBe(pkg.name))

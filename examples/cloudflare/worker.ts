@@ -1,4 +1,4 @@
-import { serve } from "@ezgh/workflows"
+import { serve } from "@ezghcloud/workflows"
 import { onboarding } from "../workflows.ts"
 
 interface Env { EZGH_WORKFLOWS_SIGNING_SECRET: string }

@@ -1,6 +1,6 @@
 // The conformance pull worker: polls the harness's workflows-live stand-in
 // (workflows-conformance --pull-addr), as workflows.md's notes say.
-import { worker } from "@ezgh/workflows"
+import { worker } from "@ezghcloud/workflows"
 import { all } from "./workflows.ts"
 
 const w = worker({

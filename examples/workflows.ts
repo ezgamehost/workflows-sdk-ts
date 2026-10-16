@@ -1,4 +1,4 @@
-import { workflow } from "@ezgh/workflows"
+import { workflow } from "@ezghcloud/workflows"
 
 export const onboarding = workflow("onboarding", async ({ input, step }) => {
   const user = await step.run("load-user", () => ({ id: (input as { userId: string }).userId, email: "ada@example.test" }))

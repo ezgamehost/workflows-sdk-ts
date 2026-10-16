@@ -4,7 +4,7 @@ import assert from "node:assert/strict"
 import * as root from "../dist/index.js"
 import * as protocol from "../dist/protocol/public.js"
 
-assert.equal(root.SDK_NAME, "@ezgh/workflows")
+assert.equal(root.SDK_NAME, "@ezghcloud/workflows")
 assert.equal("protocol" in root, false)
 assert.deepEqual(Object.keys(protocol).sort(), ["SignatureError", "decodeSecret", "sign", "verify"])
 const key = protocol.decodeSecret("whsec_AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA")

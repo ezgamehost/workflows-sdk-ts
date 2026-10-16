@@ -1,6 +1,6 @@
 // The end-to-end driver: each check through the public API (Client) against a local
 // workflows-stack; exits 1 at the first failure.
-import { Client, WorkflowsApiError, type Run } from "@ezgh/workflows"
+import { Client, WorkflowsApiError, type Run } from "@ezghcloud/workflows"
 import { childRunId, scheduledRunId, triggeredRunId } from "../src/protocol/derived.ts"
 
 const api = process.env.E2E_API ?? "http://127.0.0.1:6100"
@@ -35,7 +35,7 @@ const stepNamed = (r: Run, name: string) => r.steps?.find((s) => s.name === name
 const state = async () => (await (await fetch(`${app}/__e2e/state`)).json()) as { cleanup: number; prepare: number; callbackUrl?: string }
 
 const synced = await client.sync(appId)
-check(synced.syncStatus === "synced" && synced.workflows.length === 12 && synced.deployment === "e2e" && synced.sdk?.name === "@ezgh/workflows", "sync records the app's workflows", synced)
+check(synced.syncStatus === "synced" && synced.workflows.length === 12 && synced.deployment === "e2e" && synced.sdk?.name === "@ezghcloud/workflows", "sync records the app's workflows", synced)
 console.log("ok   sync")
 
 const complete = await until((await client.start(appId, "e2e-complete")).id, terminal)

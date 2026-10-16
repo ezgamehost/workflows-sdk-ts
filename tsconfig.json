@@ -22,10 +22,10 @@
     ],
     "verbatimModuleSyntax": true,
     "paths": {
-      "@ezgh/workflows": [
+      "@ezghcloud/workflows": [
         "./src/index.ts"
       ],
-      "@ezgh/workflows/protocol": [
+      "@ezghcloud/workflows/protocol": [
         "./src/protocol/index.ts"
       ]
     }

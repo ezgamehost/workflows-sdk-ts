@@ -1,4 +1,4 @@
-// @ezgh/workflows/protocol: verify EZGH-Signature headers yourself (for a custom transport), and
+// @ezghcloud/workflows/protocol: verify EZGH-Signature headers yourself (for a custom transport), and
 // the wire types. Everything else in the SDK's protocol code is internal.
 export type {
   Cancel, Checkpoint, Command, Endpoints, HeartbeatResponse, Invocation, InvocationResult, Journal, JournalEntry,

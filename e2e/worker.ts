@@ -1,5 +1,5 @@
 // The e2e pull worker: runs e2e-pulled for the pull app e2e/setup.ts created.
-import { worker, workflow } from "@ezgh/workflows"
+import { worker, workflow } from "@ezghcloud/workflows"
 
 const pulled = workflow("e2e-pulled", async ({ input, step }) => step.run("square", () => (input as { n: number }).n ** 2))
 const w = worker({
