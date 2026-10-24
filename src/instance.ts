@@ -55,6 +55,7 @@ export class InstanceProvider implements KeySource {
   #apiKey = ""
   #expiresAt = 0
   #nextTry = 0
+  #retryMs = 0 // the metadata service's Retry-After (503, 429) on the last answer
   #inflight: Promise<string> | undefined
   constructor(private readonly fetchImpl: FetchLike, private readonly now: () => number = Date.now, private readonly endpoint = METADATA) {}
 
@@ -65,7 +66,7 @@ export class InstanceProvider implements KeySource {
       try {
         return await (this.#inflight ??= this.fetchKey().finally(() => { this.#inflight = undefined }))
       } catch (e) {
-        this.#nextTry = now + RETRY_AFTER_MS
+        this.#nextTry = now + Math.max(RETRY_AFTER_MS, this.#retryMs)
         if (e instanceof NoBotError) this.#apiKey = ""
         // A failed fetch keeps the old key until it actually expires.
         if (this.#apiKey && now < this.#expiresAt) return this.#apiKey
@@ -86,8 +87,14 @@ export class InstanceProvider implements KeySource {
       if (!this.#token || this.now() >= this.#tokenExp) await this.newToken()
       const res = await this.call("GET", "/ezgh/v1/credentials", { "EZGH-Metadata-Token": this.#token }, 10_000)
       if (res.status === 401 && attempt === 0) { this.#token = ""; await res.body?.cancel().catch(() => {}); continue }
-      if (res.status === 404) { await res.body?.cancel().catch(() => {}); throw new NoBotError() }
-      if (!res.ok) { await res.body?.cancel().catch(() => {}); throw new Error(`Instance metadata answered ${res.status}`) }
+      if (res.status === 404) {
+        // no_bot is final; any other 404 (not_found: mid-migration) is transient, like a 503.
+        const c = (await res.json().catch(() => undefined)) as { error?: { code?: unknown } } | undefined
+        if (c?.error?.code === "no_bot") throw new NoBotError()
+        this.#retryMs = 0
+        throw new Error("Instance metadata answered 404 not_found")
+      }
+      if (!res.ok) { const ra = Number(res.headers.get("Retry-After")); this.#retryMs = Number.isFinite(ra) && ra > 0 ? ra * 1000 : 0; await res.body?.cancel().catch(() => {}); throw new Error(`Instance metadata answered ${res.status}`) }
       const c = (await res.json().catch(() => undefined)) as { apiKey?: unknown; expiresAt?: unknown } | undefined
       const expires = typeof c?.expiresAt === "string" ? Date.parse(c.expiresAt) : NaN
       if (typeof c?.apiKey !== "string" || c.apiKey === "" || Number.isNaN(expires)) throw new Error("Instance metadata sent an unreadable answer")
