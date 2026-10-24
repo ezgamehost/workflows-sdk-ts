@@ -201,25 +201,26 @@ describe("instance credentials", () => {
 
   test("NoBotError is exported", () => { expect(ExportedNoBotError).toBe(NoBotError) })
 
+  // Run in a child process: Bun's fetch reads the proxy environment process-wide, so setting
+  // HTTP_PROXY here would leak into every later test file's fetch.
   test("the metadata request never goes through an HTTP proxy", async () => {
     let proxied = 0
     const proxy = Bun.serve({ port: 0, fetch() { proxied++; return new Response("no", { status: 502 }) } })
     const meta = Bun.serve({ port: 0, fetch(req) {
-      const u = new URL(req.url)
-      if (u.pathname === "/ezgh/v1/token") return new Response("tok")
+      if (new URL(req.url).pathname === "/ezgh/v1/token") return new Response("tok")
       return Response.json({ apiKey: KEY1, expiresAt: new Date(Date.now() + 600_000).toISOString(), bot: "bot_abc" })
     } })
-    const saved = { h: process.env.HTTP_PROXY, l: process.env.http_proxy, a: process.env.ALL_PROXY, n: process.env.NO_PROXY }
-    process.env.HTTP_PROXY = process.env.http_proxy = process.env.ALL_PROXY = `http://127.0.0.1:${proxy.port}`
-    delete process.env.NO_PROXY
-    const undo = setMetadataForTests({ endpoint: `http://127.0.0.1:${meta.port}` })
     try {
-      expect(await new InstanceProvider().key()).toBe(KEY1)
-      expect(proxied).toBe(0)
+      const code = `import { InstanceProvider, setMetadataForTests } from ${JSON.stringify(new URL("../src/instance.ts", import.meta.url).pathname)}
+setMetadataForTests({ endpoint: "http://127.0.0.1:${meta.port}" })
+console.log(await new InstanceProvider().key())`
+      const proxyUrl = `http://127.0.0.1:${proxy.port}`
+      const child = Bun.spawn([process.execPath, "-e", code], {
+        env: { ...process.env, HTTP_PROXY: proxyUrl, http_proxy: proxyUrl, ALL_PROXY: proxyUrl, NO_PROXY: "", no_proxy: "" }, stdout: "pipe", stderr: "pipe",
+      })
+      const [out, err] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+      expect({ out: out.trim(), err, proxied }).toEqual({ out: KEY1, err: "", proxied: 0 })
     } finally {
-      undo()
-      for (const [k, v] of [["HTTP_PROXY", saved.h], ["http_proxy", saved.l], ["ALL_PROXY", saved.a], ["NO_PROXY", saved.n]] as const)
-        v === undefined ? delete process.env[k] : (process.env[k] = v)
       proxy.stop(true); meta.stop(true)
     }
   })
