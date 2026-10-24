@@ -131,7 +131,7 @@ export class Client {
   constructor(opts: ClientOptions) {
     this.#base = `${(opts.baseUrl ?? "https://workflows-api.ezghcloud.com").replace(/\/+$/, "")}/v1/organizations/${id(opts.organizationId)}/projects/${id(opts.projectId)}`
     this.#fetch = opts.fetch ?? ((u, i) => fetch(u, i))
-    this.#cred = keySourceFor(opts.apiKey, "Client", this.#fetch)
+    this.#cred = keySourceFor(opts.apiKey, "Client")
     this.#retries = opts.retries ?? 3
     this.#maxDelay = opts.maxRetryDelayMs ?? 10_000
     if (!Number.isInteger(this.#retries) || this.#retries < 0) throw new TypeError("retries is a whole number ≥ 0")

@@ -155,7 +155,7 @@ export function worker(opts: WorkerOptions): Worker {
   const workerId = opts.workerId ?? `${hostName()}-${crypto.randomUUID().slice(0, 8)}`
   if (!WORKER_ID.test(workerId)) throw new TypeError(`A worker ID matches ^[A-Za-z0-9._:-]{1,128}$; got "${workerId}"`)
   const fetchImpl: FetchLike = opts.fetch ?? ((u, i) => fetch(u, i))
-  const cred = keySourceFor(opts.apiKey, "worker()", fetchImpl)
+  const cred = keySourceFor(opts.apiKey, "worker()")
   let reauthed = false // an instance key the API refused is replaced once
   const sdk = { name: SDK_NAME, version: SDK_VERSION }
   const deployment = opts.deployment !== undefined ? cleanDeployment(opts.deployment) : detectDeployment()

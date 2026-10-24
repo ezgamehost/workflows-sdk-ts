@@ -88,7 +88,7 @@ export class QueuesClient {
     if (typeof opts.projectId !== "string" || opts.projectId === "") throw new TypeError("QueuesClient needs a projectId")
     this.#base = `${(opts.baseUrl ?? DEFAULT_QUEUES_BASE).replace(/\/+$/, "")}/v1/organizations/${id(opts.organizationId)}/projects/${id(opts.projectId)}`
     this.#fetch = opts.fetch ?? ((u, i) => fetch(u, i))
-    this.#cred = keySourceFor(opts.apiKey, "QueuesClient", this.#fetch)
+    this.#cred = keySourceFor(opts.apiKey, "QueuesClient")
     this.#retries = opts.retries ?? 3
     this.#maxDelay = opts.maxRetryDelayMs ?? 10_000
     this.#timeout = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS

@@ -3,7 +3,8 @@ import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Client, QueuesClient, WorkflowsApiError } from "../src/index.ts"
-import { InstanceProvider, NoBotError, setProductNamePath } from "../src/instance.ts"
+import { InstanceProvider, NoBotError, setMetadataForTests, setProductNamePath } from "../src/instance.ts"
+import { NoBotError as ExportedNoBotError } from "../src/index.ts"
 
 const KEY1 = "ezgh_" + "a".repeat(40)
 const KEY2 = "ezgh_" + "b".repeat(40)
@@ -16,6 +17,7 @@ class Fake {
   keys = [KEY1]
   status = 0 // credentials answer, when not 0
   retryAfter = ""
+  noExpiry = false
   notFound = false
   ttlMs = 10 * 60_000
   clock = () => Date.now()
@@ -34,6 +36,7 @@ class Fake {
       if (h.get("EZGH-Metadata-Token") !== this.token) return Response.json({ error: { code: "invalid_token" } }, { status: 401 })
       if (this.status === 404) return Response.json({ error: { code: this.notFound ? "not_found" : "no_bot" } }, { status: 404 })
       if (this.status) return new Response(null, { status: this.status, headers: this.retryAfter ? { "Retry-After": this.retryAfter } : {} })
+      if (this.noExpiry) return Response.json({ apiKey: KEY1, bot: "bot_abc" })
       const k = this.keys.length > 1 ? this.keys.shift()! : this.keys[0]!
       return Response.json({ apiKey: k, expiresAt: new Date(this.clock() + this.ttlMs).toISOString(), bot: "bot_abc" })
     }
@@ -45,13 +48,15 @@ class Fake {
 }
 
 let restore = () => {}
+let restoreMeta = () => {}
+const useMetadata = (f: Fake) => { restoreMeta = setMetadataForTests({ fetch: f.fetch }) }
 const onInstance = (yes: boolean) => {
   const dir = mkdtempSync(join(tmpdir(), "ezgh-"))
   const p = join(dir, "product_name")
   if (yes) writeFileSync(p, "EZGH Compute\n")
   restore = setProductNamePath(p)
 }
-afterEach(() => restore())
+afterEach(() => { restore(); restoreMeta() })
 
 describe("instance credentials", () => {
   test("provider recovers: new token on 401, refetch only near expiry, keeps the key while metadata is down", async () => {
@@ -119,6 +124,7 @@ describe("instance credentials", () => {
   test("an API 401 refetches the key once and retries once; a second 401 is returned", async () => {
     onInstance(true)
     const f = new Fake()
+    useMetadata(f)
     f.keys = [KEY1, KEY2]
     const c = new Client({ organizationId: "o", projectId: "p", baseUrl: "http://api.test", fetch: f.fetch })
     await c.getApp("app_1")
@@ -136,6 +142,7 @@ describe("instance credentials", () => {
   test("the queues client uses them too", async () => {
     onInstance(true)
     const f = new Fake()
+    useMetadata(f)
     const orig = f.fetch
     f.fetch = async (u, i) => (new URL(u).pathname.endsWith("/messages") ? (f.apiAuth.push(new Headers(i?.headers).get("Authorization")!), Response.json({ messages: [{ messageId: "m" }] })) : orig(u, i))
     const q = new QueuesClient({ organizationId: "o", projectId: "p", fetch: f.fetch })
@@ -146,6 +153,7 @@ describe("instance credentials", () => {
   test("an explicit API key wins and the metadata service is never asked", async () => {
     onInstance(true)
     const f = new Fake()
+    useMetadata(f)
     const c = new Client({ apiKey: "ezgh_explicit", organizationId: "o", projectId: "p", baseUrl: "http://api.test", fetch: f.fetch })
     await c.getApp("app_1")
     expect(f.apiAuth).toEqual(["Bearer ezgh_explicit"])
@@ -155,8 +163,64 @@ describe("instance credentials", () => {
   test("off an instance, no API key is an error and nothing is probed", () => {
     onInstance(false)
     const f = new Fake()
+    useMetadata(f)
     expect(() => new Client({ organizationId: "o", projectId: "p", fetch: f.fetch })).toThrow("needs an apiKey")
     expect(() => new QueuesClient({ organizationId: "o", projectId: "p", fetch: f.fetch })).toThrow("needs an apiKey")
     expect([f.puts, f.gets]).toEqual([0, 0])
+  })
+
+  test("with no key cached a failure is remembered: nothing is sent until Retry-After has passed", async () => {
+    const f = new Fake()
+    let now = 1_000_000_000_000
+    f.clock = () => now
+    f.status = 429
+    f.retryAfter = "120"
+    const p = new InstanceProvider(f.fetch, () => now)
+    await expect(p.key()).rejects.toThrow()
+    const n = f.gets
+    now += 30_000
+    await expect(p.key()).rejects.toThrow()
+    expect(f.gets).toBe(n)
+    f.status = 0
+    now += 91_000
+    expect(await p.key()).toBe(KEY1)
+    // no_bot backs off too; an API 401 (refused) refetches at once.
+    f.status = 404
+    p.refused(KEY1)
+    await expect(p.key()).rejects.toBeInstanceOf(NoBotError)
+    const m = f.gets
+    await expect(p.key()).rejects.toBeInstanceOf(NoBotError)
+    expect(f.gets).toBe(m)
+  })
+
+  test("an answer without expiresAt is unreadable", async () => {
+    const f = new Fake()
+    f.noExpiry = true
+    await expect(new InstanceProvider(f.fetch).key()).rejects.toThrow("unreadable")
+  })
+
+  test("NoBotError is exported", () => { expect(ExportedNoBotError).toBe(NoBotError) })
+
+  test("the metadata request never goes through an HTTP proxy", async () => {
+    let proxied = 0
+    const proxy = Bun.serve({ port: 0, fetch() { proxied++; return new Response("no", { status: 502 }) } })
+    const meta = Bun.serve({ port: 0, fetch(req) {
+      const u = new URL(req.url)
+      if (u.pathname === "/ezgh/v1/token") return new Response("tok")
+      return Response.json({ apiKey: KEY1, expiresAt: new Date(Date.now() + 600_000).toISOString(), bot: "bot_abc" })
+    } })
+    const saved = { h: process.env.HTTP_PROXY, l: process.env.http_proxy, a: process.env.ALL_PROXY, n: process.env.NO_PROXY }
+    process.env.HTTP_PROXY = process.env.http_proxy = process.env.ALL_PROXY = `http://127.0.0.1:${proxy.port}`
+    delete process.env.NO_PROXY
+    const undo = setMetadataForTests({ endpoint: `http://127.0.0.1:${meta.port}` })
+    try {
+      expect(await new InstanceProvider().key()).toBe(KEY1)
+      expect(proxied).toBe(0)
+    } finally {
+      undo()
+      for (const [k, v] of [["HTTP_PROXY", saved.h], ["http_proxy", saved.l], ["ALL_PROXY", saved.a], ["NO_PROXY", saved.n]] as const)
+        v === undefined ? delete process.env[k] : (process.env[k] = v)
+      proxy.stop(true); meta.stop(true)
+    }
   })
 })
