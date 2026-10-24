@@ -4,6 +4,7 @@
 // Node, Bun and Deno (anything with fetch and timers).
 import type { HeartbeatResponse, Invocation, InvocationResult, WorkflowInfo } from "./protocol/index.ts"
 import { PROTOCOL_VERSIONS } from "./protocol/index.ts"
+import { keySourceFor } from "./instance.ts"
 import { cleanDeployment, detectDeployment } from "./env.ts"
 import { CancelledError } from "./runtime/errors.ts"
 import { execute } from "./runtime/execution.ts"
@@ -14,7 +15,9 @@ import { SDK_NAME, SDK_VERSION } from "./version.ts"
 
 export interface WorkerOptions {
   // An EZGH API key with workflows.workers.poll (and workflows.apps.sync, to announce workflows).
-  apiKey: string
+  // Omit it on an EZGH compute instance with a Bot attached: the worker then uses the Bot's
+  // short-lived key from the metadata service (Node 22.3+, Bun, Deno 2).
+  apiKey?: string
   organizationId: string
   projectId: string
   // The pull app's ID (Client.createApp(name, { kind: "pull" })).
@@ -120,7 +123,7 @@ export function devQueue(user?: string): string {
 }
 
 export function worker(opts: WorkerOptions): Worker {
-  for (const k of ["apiKey", "organizationId", "projectId", "app"] as const)
+  for (const k of ["organizationId", "projectId", "app"] as const)
     if (typeof opts[k] !== "string" || opts[k] === "") throw new TypeError(`worker() needs ${k}`)
   const byName = new Map<string, Workflow<any, any>>()
   const announce: WorkflowInfo[] = []
@@ -152,6 +155,8 @@ export function worker(opts: WorkerOptions): Worker {
   const workerId = opts.workerId ?? `${hostName()}-${crypto.randomUUID().slice(0, 8)}`
   if (!WORKER_ID.test(workerId)) throw new TypeError(`A worker ID matches ^[A-Za-z0-9._:-]{1,128}$; got "${workerId}"`)
   const fetchImpl: FetchLike = opts.fetch ?? ((u, i) => fetch(u, i))
+  const cred = keySourceFor(opts.apiKey, "worker()", fetchImpl)
+  let reauthed = false // an instance key the API refused is replaced once
   const sdk = { name: SDK_NAME, version: SDK_VERSION }
   const deployment = opts.deployment !== undefined ? cleanDeployment(opts.deployment) : detectDeployment()
   const onError = opts.onError ?? (() => {})
@@ -169,9 +174,10 @@ export function worker(opts: WorkerOptions): Worker {
 
   async function poll(want: number): Promise<{ invocations: unknown[]; receivedAt: number; serverDate?: number }> {
     pollAbort = new AbortController()
+    const apiKey = await cred.key()
     const res = await fetchImpl(pollUrl, {
       method: "POST",
-      headers: { Authorization: `Bearer ${opts.apiKey}`, "Content-Type": "application/json", Accept: "application/json" },
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify({ app: opts.app, queue, maxTasks: want, workerId, protocolVersions: [...PROTOCOL_VERSIONS], sdk, workflows: announce }),
       signal: anySignal(pollAbort.signal, AbortSignal.timeout(POLL_TIMEOUT_MS)), redirect: "manual",
     })
@@ -187,6 +193,7 @@ export function worker(opts: WorkerOptions): Worker {
       return { invocations: Array.isArray(body.invocations) ? body.invocations : [], receivedAt, ...(Number.isNaN(date) ? {} : { serverDate: date }) }
     }
     const code = errorCode(text)
+    if (res.status === 401 && !reauthed && cred.refused(apiKey)) { reauthed = true; throw new Retryable("workflows-live refused the instance key; fetching a new one") }
     if (res.status === 401 || res.status === 403)
       throw new WorkerAuthError(res.status, `workflows-live refused the poll (${res.status}${code ? ` ${code}` : ""}): check the API key and its workflows.workers.poll permission`)
     if (res.status === 429 || res.status >= 500) throw new Retryable(`workflows-live answered ${res.status}${code ? ` ${code}` : ""}`, retryAfterMs(res))
@@ -317,6 +324,7 @@ export function worker(opts: WorkerOptions): Worker {
               continue
             }
             failures = 0
+            reauthed = false
             // Even when stop() has begun: these tasks are started, and run within its grace period.
             for (const raw of got.invocations) {
               const p: Promise<void> = handle(raw, got.receivedAt, got.serverDate).finally(() => active.delete(p))

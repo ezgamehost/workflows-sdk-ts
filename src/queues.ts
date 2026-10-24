@@ -1,4 +1,5 @@
 import { toHex, utf8 } from "./protocol/bytes.ts"
+import { keySourceFor, type KeySource } from "./instance.ts"
 import type { FetchLike } from "./runtime/live.ts"
 
 // EZGH Queues: a client for the public send API (queues-api), which step.sendToQueue uses.
@@ -31,8 +32,10 @@ export class QueuesApiError extends Error {
 }
 
 export interface QueuesClientOptions {
-  // An EZGH API key (or other bearer credential) with queues.messages.send on the queues it sends to.
-  apiKey: string
+  // An EZGH API key (or other bearer credential) with queues.messages.send on the queues it sends
+  // to. Omit it on an EZGH compute instance with a Bot attached: the client then uses the Bot's
+  // short-lived key from the metadata service (Node 22.3+, Bun, Deno 2).
+  apiKey?: string
   organizationId: string
   projectId: string
   // Default https://queues-api.ezghcloud.com.
@@ -74,19 +77,18 @@ function resendable(err: QueuesApiError): boolean {
 // send directly outside a workflow.
 export class QueuesClient {
   // ES private fields: the API key never shows in console.log, util.inspect or JSON.stringify.
-  readonly #apiKey: string
+  readonly #cred: KeySource
   readonly #base: string
   readonly #fetch: FetchLike
   readonly #retries: number
   readonly #maxDelay: number
   readonly #timeout: number
   constructor(opts: QueuesClientOptions) {
-    if (typeof opts?.apiKey !== "string" || opts.apiKey === "") throw new TypeError("QueuesClient needs an apiKey")
     if (typeof opts.organizationId !== "string" || opts.organizationId === "") throw new TypeError("QueuesClient needs an organizationId")
     if (typeof opts.projectId !== "string" || opts.projectId === "") throw new TypeError("QueuesClient needs a projectId")
-    this.#apiKey = opts.apiKey
     this.#base = `${(opts.baseUrl ?? DEFAULT_QUEUES_BASE).replace(/\/+$/, "")}/v1/organizations/${id(opts.organizationId)}/projects/${id(opts.projectId)}`
     this.#fetch = opts.fetch ?? ((u, i) => fetch(u, i))
+    this.#cred = keySourceFor(opts.apiKey, "QueuesClient", this.#fetch)
     this.#retries = opts.retries ?? 3
     this.#maxDelay = opts.maxRetryDelayMs ?? 10_000
     this.#timeout = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
@@ -103,10 +105,13 @@ export class QueuesClient {
     if (!Array.isArray(messages) || messages.length < 1 || messages.length > 10) throw new TypeError("send takes 1 to 10 messages")
     const key = opts.idempotencyKey ?? crypto.randomUUID()
     if (typeof key !== "string" || !IDEMPOTENCY_KEY.test(key)) throw new TypeError("An idempotencyKey is 1–200 printable ASCII characters")
-    const headers = { Authorization: `Bearer ${this.#apiKey}`, Accept: "application/json", "Content-Type": "application/json", "Idempotency-Key": key }
+    const headers = { Authorization: "", Accept: "application/json", "Content-Type": "application/json", "Idempotency-Key": key }
     const body = JSON.stringify({ messages })
     const url = `${this.#base}/queues/${id(queueId)}/messages`
+    let reauthed = false // an instance key the API refused is replaced once per call
     for (let attempt = 0; ; attempt++) {
+      const apiKey = await this.#cred.key()
+      headers.Authorization = `Bearer ${apiKey}`
       let res: Response
       try {
         res = await this.#fetch(url, { method: "POST", headers, body, redirect: "manual", signal: AbortSignal.timeout(this.#timeout) })
@@ -125,6 +130,7 @@ export class QueuesClient {
         return data as SentMessages
       }
       const err = apiError(res, data)
+      if (res.status === 401 && !reauthed && this.#cred.refused(apiKey)) { reauthed = true; attempt--; continue }
       if (!resendable(err) || attempt >= this.#retries) throw err
       await sleep(Math.min(this.#maxDelay, err.retryAfterSeconds !== undefined ? err.retryAfterSeconds * 1000 : 500 * 2 ** attempt))
     }

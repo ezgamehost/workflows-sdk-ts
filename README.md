@@ -270,7 +270,7 @@ Developers sharing a project never take each other's runs. `devApp` needs `workf
 
 ## The Client
 
-`new Client({ apiKey, organizationId, projectId, baseUrl?, retries?, maxRetryDelayMs?, timeoutMs? })`
+`new Client({ apiKey?, organizationId, projectId, baseUrl?, retries?, maxRetryDelayMs?, timeoutMs? })`
 calls the Workflows API at `baseUrl`, by default `https://workflows-api.ezghcloud.com`. Each
 request times out after `timeoutMs` (default 30 s). It retries 429, 503, a 409
 `idempotency_in_progress` and network errors after `Retry-After` (default 3 retries, at most 10 s
@@ -311,6 +311,16 @@ schedule started sees `run.schedule` (`{ id, scheduledTime }`).
 **Callbacks** can also be completed by an authenticated caller: `completeCallback(runId, stepId,
 value)` answers the run. Without a client, `completeCallbackURL(url, value)` POSTs the value to a
 callback's URL (no credential: the URL's token is one).
+
+## On an EZGH compute instance
+
+Leave `apiKey` out on an EZGH compute instance that has a Bot attached, and `Client`,
+`QueuesClient` and `worker()` use the Bot's short-lived key from the instance's metadata service.
+The key is fetched when needed, refreshed 5 minutes before it expires, and replaced once (with
+one retry) when the API answers 401. The Bot needs the actions the calls use, like any key. An
+explicit `apiKey` always wins; off an instance an empty key is still a `TypeError`. Reading the
+instance's product name needs `process.getBuiltinModule` (Node 22.3+, Bun, Deno 2); elsewhere
+pass `apiKey`. Anything on the instance, containers included, can fetch the Bot's key.
 
 ## Semantics
 

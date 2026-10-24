@@ -1,4 +1,5 @@
 import type { RetryPolicy, SDKInfo, WireError } from "./protocol/index.ts"
+import { keySourceFor, type KeySource } from "./instance.ts"
 import type { FetchLike } from "./runtime/live.ts"
 import { devQueue } from "./worker.ts"
 
@@ -60,8 +61,10 @@ export class WorkflowsApiError extends Error {
 }
 
 export interface ClientOptions {
-  // An EZGH API key (or other bearer credential) with the workflows actions it uses.
-  apiKey: string
+  // An EZGH API key (or other bearer credential) with the workflows actions it uses. Omit it on an
+  // EZGH compute instance with a Bot attached: the client then uses the Bot's short-lived key
+  // from the metadata service (Node 22.3+, Bun, Deno 2).
+  apiKey?: string
   organizationId: string
   projectId: string
   baseUrl?: string
@@ -119,16 +122,16 @@ export async function completeCallbackURL(url: string, value: unknown, opts: { f
 // (start, inspect, cancel, retry, payloads, events).
 export class Client {
   // ES private fields: the API key never shows in console.log, util.inspect or JSON.stringify.
-  readonly #apiKey: string
+  readonly #cred: KeySource
   readonly #base: string
   readonly #fetch: FetchLike
   readonly #retries: number
   readonly #maxDelay: number
   readonly #timeout: number
   constructor(opts: ClientOptions) {
-    this.#apiKey = opts.apiKey
     this.#base = `${(opts.baseUrl ?? "https://workflows-api.ezghcloud.com").replace(/\/+$/, "")}/v1/organizations/${id(opts.organizationId)}/projects/${id(opts.projectId)}`
     this.#fetch = opts.fetch ?? ((u, i) => fetch(u, i))
+    this.#cred = keySourceFor(opts.apiKey, "Client", this.#fetch)
     this.#retries = opts.retries ?? 3
     this.#maxDelay = opts.maxRetryDelayMs ?? 10_000
     if (!Number.isInteger(this.#retries) || this.#retries < 0) throw new TypeError("retries is a whole number ≥ 0")
@@ -149,12 +152,15 @@ export class Client {
   }
 
   private async send<T>(method: string, path: string, body: unknown, idempotencyKey: string | undefined, returnsSecret: boolean, extraHeaders: Record<string, string>): Promise<T> {
-    const headers: Record<string, string> = { Authorization: `Bearer ${this.#apiKey}`, Accept: "application/json", ...extraHeaders }
+    const headers: Record<string, string> = { Accept: "application/json", ...extraHeaders }
     if (body !== undefined) headers["Content-Type"] = "application/json"
     if (method !== "GET") headers["Idempotency-Key"] = idempotencyKey ?? crypto.randomUUID()
     const retries = this.#retries
     const maxDelay = this.#maxDelay
+    let reauthed = false // an instance key the API refused is replaced once per call
     for (let attempt = 0; ; attempt++) {
+      const key = await this.#cred.key()
+      headers.Authorization = `Bearer ${key}`
       let res: Response
       try {
         res = await this.#fetch(this.#base + path, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}), redirect: "manual", signal: AbortSignal.timeout(this.#timeout) })
@@ -169,6 +175,7 @@ export class Client {
       try { data = text ? JSON.parse(text) : undefined } catch { data = undefined }
       if (res.ok) return data as T
       const err = apiError(res, data)
+      if (res.status === 401 && !reauthed && this.#cred.refused(key)) { reauthed = true; attempt--; continue }
       const inProgress = res.status === 409 && err.code === "idempotency_in_progress"
       if (returnsSecret && (res.status === 503 || inProgress)) throw outcomeUnknown(`The API answered ${res.status} ${err.code}`)
       if ((res.status !== 429 && res.status !== 503 && !inProgress) || attempt >= retries) throw err
