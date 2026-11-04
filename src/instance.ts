@@ -7,7 +7,9 @@ const REFRESH_AHEAD_MS = 5 * 60_000
 const TOKEN_TTL_S = 6 * 3600
 const RETRY_AFTER_MS = 5_000
 let productNamePath = "/sys/class/dmi/id/product_name"
-let metadataEndpoint = "http://169.254.169.254"
+// IPv4 first, then IPv6, which an IPv6-only instance only has (there the IPv4 connect fails at
+// once, network unreachable).
+let metadataEndpoints = ["http://169.254.169.254", "http://[fd65:7a67:6800::254]"]
 let metadataFetch: FetchLike = directFetch
 
 // For tests only (not exported from the package index).
@@ -18,11 +20,11 @@ export function setProductNamePath(p: string): () => void {
 }
 
 // For tests only: where the metadata service is, and the fetch that reaches it.
-export function setMetadataForTests(o: { endpoint?: string; fetch?: FetchLike }): () => void {
-  const old = { e: metadataEndpoint, f: metadataFetch }
-  if (o.endpoint !== undefined) metadataEndpoint = o.endpoint
+export function setMetadataForTests(o: { endpoints?: string[]; fetch?: FetchLike }): () => void {
+  const old = { e: metadataEndpoints, f: metadataFetch }
+  if (o.endpoints !== undefined) metadataEndpoints = o.endpoints
   if (o.fetch !== undefined) metadataFetch = o.fetch
-  return () => { metadataEndpoint = old.e; metadataFetch = old.f }
+  return () => { metadataEndpoints = old.e; metadataFetch = old.f }
 }
 
 // directFetch reaches the metadata service without ever using a proxy: the session token and the
@@ -107,6 +109,7 @@ export class InstanceProvider implements KeySource {
   #lastErr: unknown
   #retryMs = 0 // the metadata service's Retry-After (503, 429) on the last answer
   #inflight: Promise<string> | undefined
+  #at = 0 // index in metadataEndpoints of the address that last answered
   constructor(private readonly fetchImpl?: FetchLike, private readonly now: () => number = Date.now, private readonly endpoint?: string) {}
 
   async key(): Promise<string> {
@@ -165,10 +168,19 @@ export class InstanceProvider implements KeySource {
   }
 
   private async call(method: string, path: string, headers: Record<string, string>, timeoutMs: number): Promise<Response> {
-    try {
-      return await (this.fetchImpl ?? metadataFetch)((this.endpoint ?? metadataEndpoint) + path, { method, headers: { "EZGH-Metadata": "true", ...headers }, redirect: "manual", signal: AbortSignal.timeout(timeoutMs) })
-    } catch (e) {
-      throw new Error(`Instance metadata unreachable: ${e instanceof Error ? e.message : String(e)}`)
+    // An explicit endpoint is the only one; else each address, from the one that last answered.
+    const endpoints = this.endpoint ? [this.endpoint] : metadataEndpoints
+    const errs: string[] = []
+    for (let i = 0; i < endpoints.length; i++) {
+      const at = (this.#at + i) % endpoints.length
+      try {
+        const res = await (this.fetchImpl ?? metadataFetch)(endpoints[at] + path, { method, headers: { "EZGH-Metadata": "true", ...headers }, redirect: "manual", signal: AbortSignal.timeout(timeoutMs) })
+        if (!this.endpoint) this.#at = at
+        return res
+      } catch (e) {
+        errs.push(e instanceof Error ? e.message : String(e))
+      }
     }
+    throw new Error(`Instance metadata unreachable: ${errs.join("; ")}`)
   }
 }

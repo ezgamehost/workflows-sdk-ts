@@ -199,6 +199,21 @@ describe("instance credentials", () => {
     await expect(new InstanceProvider(f.fetch).key()).rejects.toThrow("unreadable")
   })
 
+  test("an address with no answer (IPv6-only instance) falls through to the next, which is kept", async () => {
+    const f = new Fake()
+    const tried: string[] = []
+    restoreMeta = setMetadataForTests({
+      endpoints: ["http://v4", "http://v6"],
+      fetch: async (url, init) => {
+        tried.push(new URL(url).host)
+        if (url.startsWith("http://v4")) throw new Error("connect ENETUNREACH 169.254.169.254:80")
+        return f.fetch(url, init)
+      },
+    })
+    expect(await new InstanceProvider().key()).toBe(KEY1)
+    expect(tried).toEqual(["v4", "v6", "v6"]) // token on v6 after v4 failed; credentials straight to v6
+  })
+
   test("NoBotError is exported", () => { expect(ExportedNoBotError).toBe(NoBotError) })
 
   // Run in a child process: Bun's fetch reads the proxy environment process-wide, so setting
@@ -212,7 +227,7 @@ describe("instance credentials", () => {
     } })
     try {
       const code = `import { InstanceProvider, setMetadataForTests } from ${JSON.stringify(new URL("../src/instance.ts", import.meta.url).pathname)}
-setMetadataForTests({ endpoint: "http://127.0.0.1:${meta.port}" })
+setMetadataForTests({ endpoints: ["http://127.0.0.1:${meta.port}"] })
 console.log(await new InstanceProvider().key())`
       const proxyUrl = `http://127.0.0.1:${proxy.port}`
       const child = Bun.spawn([process.execPath, "-e", code], {
