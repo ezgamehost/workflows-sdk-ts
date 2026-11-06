@@ -1,11 +1,12 @@
 // Instance credentials: on an EZGH compute instance with a Bot attached, a client given no API
 // key uses the Bot's short-lived key from the instance's metadata service.
+import { ContainerProvider, containerEnv } from "./container.ts"
 import type { FetchLike } from "./runtime/live.ts"
 
 const PRODUCT = "EZGH Compute"
-const REFRESH_AHEAD_MS = 5 * 60_000
+export const REFRESH_AHEAD_MS = 5 * 60_000
 const TOKEN_TTL_S = 6 * 3600
-const RETRY_AFTER_MS = 5_000
+export const RETRY_AFTER_MS = 5_000
 let productNamePath = "/sys/class/dmi/id/product_name"
 // IPv4 first, then IPv6, which an IPv6-only instance only has (there the IPv4 connect fails at
 // once, network unreachable).
@@ -27,15 +28,21 @@ export function setMetadataForTests(o: { endpoints?: string[]; fetch?: FetchLike
   return () => { metadataEndpoints = old.e; metadataFetch = old.f }
 }
 
-// directFetch reaches the metadata service without ever using a proxy: the session token and the
-// Bot's key must not cross one (a forward proxy on another EZGH instance would answer with its own
+// directFetch reaches the metadata service (or the pod identity agent) without ever using a proxy:
+// the session or service account token and the Bot's key must not cross one (a forward proxy on another EZGH instance would answer with its own
 // Bot's key), and global fetch honours HTTP_PROXY in Bun and Deno. node:http with its own Agent
 // uses none (Node's env-proxy support applies to the global agents only).
 interface NodeHttp {
   Agent: new () => unknown
   request(url: string, o: { method: string; headers?: Record<string, string>; agent: unknown; signal?: AbortSignal }, cb: (res: NodeRes) => void): NodeReq
 }
-interface NodeReq { on(ev: "error", f: (e: Error) => void): void; end(): void }
+interface NodeReq {
+  on(ev: "error", f: (e: Error) => void): void
+  on(ev: "socket", f: (s: { once(ev: "connect", f: () => void): void }) => void): void
+  once(ev: "close", f: () => void): void
+  destroy(e: Error): void
+  end(): void
+}
 interface NodeRes {
   statusCode?: number
   headers: Record<string, string | string[] | undefined>
@@ -44,7 +51,7 @@ interface NodeRes {
   on(ev: "error", f: (e: Error) => void): void
 }
 
-function directFetch(url: string, init: RequestInit = {}): Promise<Response> {
+export function directFetch(url: string, init: RequestInit = {}, connectTimeoutMs = 0): Promise<Response> {
   const http = (globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } }).process?.getBuiltinModule?.("node:http") as NodeHttp | undefined
   if (!http) return Promise.reject(new Error("no node:http to reach the metadata service"))
   return new Promise<Response>((resolve, reject) => {
@@ -63,6 +70,11 @@ function directFetch(url: string, init: RequestInit = {}): Promise<Response> {
       })
     })
     req.on("error", reject)
+    if (connectTimeoutMs > 0) req.on("socket", (s) => {
+      const t = setTimeout(() => req.destroy(new Error(`connect timed out after ${connectTimeoutMs} ms`)), connectTimeoutMs)
+      s.once("connect", () => clearTimeout(t))
+      req.once("close", () => clearTimeout(t))
+    })
     req.end()
   })
 }
@@ -92,10 +104,14 @@ export interface KeySource {
   refused(key: string): boolean
 }
 
-// keySourceFor: the API key if given, else the instance's credentials on an instance, else a
+// keySourceFor: the API key if given, else the container's credentials when
+// EZGH_CONTAINER_CREDENTIALS_FULL_URI is set (never falling through to the instance: a bad URI or
+// token file fails at the first request), else the instance's credentials on an instance, else a
 // TypeError ("<what> needs an apiKey").
 export function keySourceFor(apiKey: unknown, what: string, now: () => number = Date.now): KeySource {
   if (typeof apiKey === "string" && apiKey !== "") return { key: async () => apiKey, refused: () => false }
+  const c = apiKey === undefined || apiKey === "" ? containerEnv() : undefined
+  if (c) return new ContainerProvider(c.uri, c.tokenFile, now)
   if ((apiKey === undefined || apiKey === "") && onInstance()) return new InstanceProvider(undefined, now)
   throw new TypeError(`${what} needs an apiKey`)
 }

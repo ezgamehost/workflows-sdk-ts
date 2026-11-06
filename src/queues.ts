@@ -33,8 +33,9 @@ export class QueuesApiError extends Error {
 
 export interface QueuesClientOptions {
   // An EZGH API key (or other bearer credential) with queues.messages.send on the queues it sends
-  // to. Omit it on an EZGH compute instance with a Bot attached: the client then uses the Bot's
-  // short-lived key from the metadata service (Node 22.3+, Bun, Deno 2).
+  // to. Omit it in an EZGH Kubernetes pod with pod identity or on an EZGH compute instance with a
+  // Bot attached: the client then uses the Bot's short-lived key from the pod identity agent or
+  // the metadata service (Node 22.3+, Bun, Deno 2).
   apiKey?: string
   organizationId: string
   projectId: string

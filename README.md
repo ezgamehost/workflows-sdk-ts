@@ -322,6 +322,18 @@ explicit `apiKey` always wins; off an instance an empty key is still a `TypeErro
 instance's product name needs `process.getBuiltinModule` (Node 22.3+, Bun, Deno 2); elsewhere
 pass `apiKey`. Anything on the instance, containers included, can fetch the Bot's key.
 
+### In an EZGH Kubernetes pod
+
+**[built, waiting for EZGH Kubernetes to launch]** With `apiKey` left out, a pod whose service
+account has a pod identity association uses its Bot's short-lived key from the node's pod
+identity agent, ahead of instance credentials. EZGH Kubernetes injects
+`EZGH_CONTAINER_CREDENTIALS_FULL_URI` and `EZGH_CONTAINER_AUTHORIZATION_TOKEN_FILE`; the SDK
+`GET`s the URI with the token file's contents (read afresh each time, as kubelet rotates it) as a
+bearer token, directly (no proxy, 1 s connect timeout), and refreshes and retries on 401 as above.
+The URI must be `http` to `169.254.170.23`, `[fd65:7a67:6800::23]` or a loopback address, or no
+request is made. Once the URI is set, a bad URI or an unreadable token file is an error, never a
+fall-back to the node's instance credentials.
+
 ## Semantics
 
 - **Steps run at least once.** A step can run again if the process dies after it ran but before

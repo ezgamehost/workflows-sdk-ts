@@ -15,8 +15,9 @@ import { SDK_NAME, SDK_VERSION } from "./version.ts"
 
 export interface WorkerOptions {
   // An EZGH API key with workflows.workers.poll (and workflows.apps.sync, to announce workflows).
-  // Omit it on an EZGH compute instance with a Bot attached: the worker then uses the Bot's
-  // short-lived key from the metadata service (Node 22.3+, Bun, Deno 2).
+  // Omit it in an EZGH Kubernetes pod with pod identity or on an EZGH compute instance with a Bot
+  // attached: the worker then uses the Bot's short-lived key from the pod identity agent or the
+  // metadata service (Node 22.3+, Bun, Deno 2).
   apiKey?: string
   organizationId: string
   projectId: string
