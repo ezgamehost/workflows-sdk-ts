@@ -1,7 +1,7 @@
 // Container credentials: in an EZGH Kubernetes pod whose service account has a pod identity
 // association, a client given no API key uses the Bot's short-lived key from the node's pod
 // identity agent, presenting the pod's projected service account token.
-import { REFRESH_AHEAD_MS, RETRY_AFTER_MS, directFetch, type KeySource } from "./instance.ts"
+import { REFRESH_AHEAD_MS, RETRY_AFTER_MS, directFetch, retryAfterMs, type KeySource } from "./instance.ts"
 
 // The variables EZGH Kubernetes injects into such a pod.
 const URI_ENV = "EZGH_CONTAINER_CREDENTIALS_FULL_URI"
@@ -46,10 +46,11 @@ export class ContainerProvider implements KeySource {
       try {
         return await (this.#inflight ??= this.fetchKey().finally(() => { this.#inflight = undefined }))
       } catch (e) {
+        const after = this.now() // the fetch may have taken seconds
         this.#lastErr = e
-        this.#nextTry = now + Math.max(RETRY_AFTER_MS, this.#retryMs)
+        this.#nextTry = after + Math.max(RETRY_AFTER_MS, this.#retryMs)
         // A failed fetch keeps the old key until it actually expires.
-        if (this.#apiKey && now < this.#expiresAt) return this.#apiKey
+        if (this.#apiKey && after < this.#expiresAt) return this.#apiKey
         throw e
       }
     }
@@ -64,6 +65,7 @@ export class ContainerProvider implements KeySource {
   }
 
   private async fetchKey(): Promise<string> {
+    this.#retryMs = 0
     checkContainerUri(this.uri)
     if (!this.tokenFile) throw new Error(`${URI_ENV} is set but ${TOKEN_FILE_ENV} is not`)
     // Read afresh every time: kubelet rotates the projected token.
@@ -82,8 +84,7 @@ export class ContainerProvider implements KeySource {
     } catch (e) {
       throw new Error(`Pod identity agent unreachable: ${e instanceof Error ? e.message : String(e)}`)
     }
-    const ra = Number(res.headers.get("Retry-After"))
-    this.#retryMs = Number.isFinite(ra) && ra > 0 ? ra * 1000 : 0
+    this.#retryMs = retryAfterMs(res.headers.get("Retry-After"))
     const c = (await res.json().catch(() => undefined)) as { apiKey?: unknown; expiresAt?: unknown; error?: { code?: unknown } } | undefined
     if (!res.ok) throw new Error(`Pod identity agent answered ${res.status}${typeof c?.error?.code === "string" ? ` (${c.error.code})` : ""}`)
     const expires = typeof c?.expiresAt === "string" ? Date.parse(c.expiresAt) : NaN

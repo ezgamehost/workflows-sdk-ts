@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtempSync, writeFileSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Client, WorkflowsApiError } from "../src/index.ts"
@@ -18,6 +18,7 @@ class Agent {
   status = 0
   retryAfter = ""
   clock = () => Date.now()
+  during = () => {} // runs while the agent answers: a slow fetch moves the test's clock
   refused = new Set<string>()
   apiAuth: string[] = []
   srv = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => {
@@ -28,6 +29,7 @@ class Agent {
       return Response.json({ id: "app_1" })
     }
     this.gets++
+    this.during()
     this.tokens.push(auth.replace(/^Bearer /, ""))
     if (this.status) return new Response(null, { status: this.status, headers: this.retryAfter ? { "Retry-After": this.retryAfter } : {} })
     const k = this.keys.length > 1 ? this.keys.shift()! : this.keys[0]!
@@ -113,6 +115,41 @@ describe("container credentials", () => {
     expect(a.gets).toBe(n)
     now += 4 * 60_000 // expired
     await expect(p.key()).rejects.toThrow("answered 503")
+  })
+
+  test("a slow failed fetch reads the clock again: no expired key, backoff from its end", async () => {
+    const a = agent()
+    let now = Date.now()
+    a.clock = () => now
+    const p = new ContainerProvider(a.uri, tokenFile("sa"), () => now)
+    expect(await p.key()).toBe(POD_KEY)
+    now += 6 * 60_000 // refresh due; the key lives 4 more minutes
+    a.status = 503
+    a.during = () => { now += 5 * 60_000 } // the fetch outlives the key
+    await expect(p.key()).rejects.toThrow("answered 503")
+    a.during = () => {}
+    const n = a.gets
+    now += 4_000 // within 5 s of the fetch's end: nothing is asked
+    await expect(p.key()).rejects.toThrow("answered 503")
+    expect(a.gets).toBe(n)
+  })
+
+  test("Retry-After is capped at 5 minutes and lasts only for the answer that sent it", async () => {
+    const a = agent()
+    let now = Date.now()
+    a.clock = () => now
+    const file = tokenFile("sa")
+    const p = new ContainerProvider(a.uri, file, () => now)
+    a.status = 503
+    a.retryAfter = "100000"
+    await expect(p.key()).rejects.toThrow("answered 503")
+    now += 301_000
+    rmSync(file) // fails with no answer from the agent: the default 5 s backoff
+    await expect(p.key()).rejects.toThrow("EZGH_CONTAINER_AUTHORIZATION_TOKEN_FILE")
+    writeFileSync(file, "sa\n")
+    a.status = 0
+    now += 6_000
+    expect(await p.key()).toBe(POD_KEY)
   })
 
   test("a 401 refetches once", async () => {

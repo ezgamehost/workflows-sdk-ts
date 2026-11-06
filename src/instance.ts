@@ -7,6 +7,13 @@ const PRODUCT = "EZGH Compute"
 export const REFRESH_AHEAD_MS = 5 * 60_000
 const TOKEN_TTL_S = 6 * 3600
 export const RETRY_AFTER_MS = 5_000
+const MAX_RETRY_AFTER_S = 300
+
+// retryAfterMs: a Retry-After in seconds, capped at 5 minutes; 0 when absent or unreadable.
+export function retryAfterMs(h: string | null): number {
+  const ra = Number(h)
+  return Number.isFinite(ra) && ra > 0 ? Math.min(ra, MAX_RETRY_AFTER_S) * 1000 : 0
+}
 let productNamePath = "/sys/class/dmi/id/product_name"
 // IPv4 first, then IPv6, which an IPv6-only instance only has (there the IPv4 connect fails at
 // once, network unreachable).
@@ -135,11 +142,12 @@ export class InstanceProvider implements KeySource {
       try {
         return await (this.#inflight ??= this.fetchKey().finally(() => { this.#inflight = undefined }))
       } catch (e) {
+        const after = this.now() // the fetch may have taken seconds
         this.#lastErr = e
-        this.#nextTry = now + Math.max(RETRY_AFTER_MS, this.#retryMs)
+        this.#nextTry = after + Math.max(RETRY_AFTER_MS, this.#retryMs)
         if (e instanceof NoBotError) this.#apiKey = ""
         // A failed fetch keeps the old key until it actually expires.
-        if (this.#apiKey && now < this.#expiresAt) return this.#apiKey
+        if (this.#apiKey && after < this.#expiresAt) return this.#apiKey
         throw e
       }
     }
@@ -154,6 +162,7 @@ export class InstanceProvider implements KeySource {
   }
 
   private async fetchKey(): Promise<string> {
+    this.#retryMs = 0
     for (let attempt = 0; ; attempt++) {
       if (!this.#token || this.now() >= this.#tokenExp) await this.newToken()
       const res = await this.call("GET", "/ezgh/v1/credentials", { "EZGH-Metadata-Token": this.#token }, 10_000)
@@ -165,7 +174,7 @@ export class InstanceProvider implements KeySource {
         this.#retryMs = 0
         throw new Error("Instance metadata answered 404 not_found")
       }
-      if (!res.ok) { const ra = Number(res.headers.get("Retry-After")); this.#retryMs = Number.isFinite(ra) && ra > 0 ? ra * 1000 : 0; await res.body?.cancel().catch(() => {}); throw new Error(`Instance metadata answered ${res.status}`) }
+      if (!res.ok) { this.#retryMs = retryAfterMs(res.headers.get("Retry-After")); await res.body?.cancel().catch(() => {}); throw new Error(`Instance metadata answered ${res.status}`) }
       const c = (await res.json().catch(() => undefined)) as { apiKey?: unknown; expiresAt?: unknown } | undefined
       const expires = typeof c?.expiresAt === "string" ? Date.parse(c.expiresAt) : NaN
       if (typeof c?.apiKey !== "string" || c.apiKey === "" || Number.isNaN(expires) || expires <= 0) throw new Error("Instance metadata sent an unreadable answer")
