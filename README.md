@@ -322,6 +322,9 @@ explicit `apiKey` always wins; off an instance an empty key is still a `TypeErro
 instance's product name needs `process.getBuiltinModule` (Node 22.3+, Bun, Deno 2); elsewhere
 pass `apiKey`. Anything on the instance, containers included, can fetch the Bot's key.
 
+The same holds in an EZGH sandbox created with a Bot: the clients use the Bot's key from the same
+endpoint. Any code in the sandbox can fetch it.
+
 ### In an EZGH Kubernetes pod
 
 **[built, waiting for EZGH Kubernetes to launch]** With `apiKey` left out, a pod whose service

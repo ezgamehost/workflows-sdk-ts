@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Client, QueuesClient, WorkflowsApiError } from "../src/index.ts"
-import { InstanceProvider, NoBotError, setMetadataForTests, setProductNamePath } from "../src/instance.ts"
+import { InstanceProvider, NoBotError, setCmdlinePath, setMetadataForTests, setProductNamePath } from "../src/instance.ts"
 import { NoBotError as ExportedNoBotError } from "../src/index.ts"
 
 const KEY1 = "ezgh_" + "a".repeat(40)
@@ -167,6 +167,26 @@ describe("instance credentials", () => {
     expect(() => new Client({ organizationId: "o", projectId: "p", fetch: f.fetch })).toThrow("needs an apiKey")
     expect(() => new QueuesClient({ organizationId: "o", projectId: "p", fetch: f.fetch })).toThrow("needs an apiKey")
     expect([f.puts, f.gets]).toEqual([0, 0])
+  })
+
+  test("in a sandbox (ezgh.product=sandbox among the boot arguments) the Bot's key is used; a near miss isn't one", async () => {
+    onInstance(false)
+    const cmdline = join(mkdtempSync(join(tmpdir(), "ezgh-")), "cmdline")
+    const undo = restore
+    const restoreCmdline = setCmdlinePath(cmdline)
+    restore = () => { undo(); restoreCmdline() }
+    const f = new Fake()
+    useMetadata(f)
+    for (const line of ["console=ttyS0 ezgh.product=sandboxes\n", "console=ttyS0 xezgh.product=sandbox\n", "BOOT_IMAGE=/vmlinuz ro\n"]) {
+      writeFileSync(cmdline, line)
+      expect(() => new Client({ organizationId: "o", projectId: "p", fetch: f.fetch })).toThrow("needs an apiKey")
+    }
+    expect([f.puts, f.gets]).toEqual([0, 0])
+    writeFileSync(cmdline, "console=ttyS0 reboot=k ezgh.product=sandbox\n")
+    const orig = f.fetch
+    f.fetch = async (u, i) => (new URL(u).pathname.endsWith("/messages") ? (f.apiAuth.push(new Headers(i?.headers).get("Authorization")!), Response.json({ messages: [{ messageId: "m" }] })) : orig(u, i))
+    await new QueuesClient({ organizationId: "o", projectId: "p", fetch: f.fetch }).send("que_abc", [{ body: "hi" }])
+    expect(f.apiAuth).toEqual([`Bearer ${KEY1}`])
   })
 
   test("with no key cached a failure is remembered: nothing is sent until Retry-After has passed", async () => {

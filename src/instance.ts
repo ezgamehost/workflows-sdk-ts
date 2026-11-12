@@ -15,6 +15,9 @@ export function retryAfterMs(h: string | null): number {
   return Number.isFinite(ra) && ra > 0 ? Math.min(ra, MAX_RETRY_AFTER_S) * 1000 : 0
 }
 let productNamePath = "/sys/class/dmi/id/product_name"
+// A sandbox has no product name: it is known by this among the kernel's boot arguments.
+const SANDBOX_ARG = "ezgh.product=sandbox"
+let cmdlinePath = "/proc/cmdline"
 // IPv4 first, then IPv6, which an IPv6-only instance only has (there the IPv4 connect fails at
 // once, network unreachable).
 let metadataEndpoints = ["http://169.254.169.254", "http://[fd65:7a67:6800::254]"]
@@ -25,6 +28,13 @@ export function setProductNamePath(p: string): () => void {
   const old = productNamePath
   productNamePath = p
   return () => { productNamePath = old }
+}
+
+// For tests only (not exported from the package index).
+export function setCmdlinePath(p: string): () => void {
+  const old = cmdlinePath
+  cmdlinePath = p
+  return () => { cmdlinePath = old }
 }
 
 // For tests only: where the metadata service is, and the fetch that reaches it.
@@ -92,16 +102,21 @@ export class NoBotError extends Error {
   constructor() { super("This instance has no Bot attached") }
 }
 
-// onInstance: this machine is an EZGH compute instance (SMBIOS product name). No network.
+// onInstance: this machine is an EZGH compute instance (SMBIOS product name) or an EZGH sandbox
+// (ezgh.product=sandbox among the boot arguments), which serves its Bot's keys at the same
+// endpoint. No network.
 // Needs node:fs through process.getBuiltinModule (Node 22.3+, Bun, Deno 2); elsewhere false.
 function onInstance(): boolean {
-  try {
-    const p = (globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } }).process
-    const fs = p?.getBuiltinModule?.("node:fs") as { readFileSync(path: string, enc: "utf8"): string } | undefined
-    return fs?.readFileSync(productNamePath, "utf8").trim() === PRODUCT
-  } catch {
-    return false
+  const p = (globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } }).process
+  const read = (path: string): string => {
+    try {
+      const fs = p?.getBuiltinModule?.("node:fs") as { readFileSync(path: string, enc: "utf8"): string } | undefined
+      return fs?.readFileSync(path, "utf8") ?? ""
+    } catch {
+      return ""
+    }
   }
+  return read(productNamePath).trim() === PRODUCT || read(cmdlinePath).split(/\s+/).includes(SANDBOX_ARG)
 }
 
 // KeySource gives the key for each request; refused(key) is told the API answered 401 to it and
