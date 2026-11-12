@@ -21,7 +21,7 @@ export interface WorkerOptions {
   apiKey?: string
   organizationId: string
   projectId: string
-  // The pull app's ID (Client.createApp(name, { kind: "pull" })).
+  // The pull app's ID (Client.createApp(name, { kind: "pull" })): its UUID or its wfa_ ID.
   app: string
   // The app's task queue (default "default"; lowercase letters, digits and -, at most 63). dev
   // mode uses dev-<user> instead.

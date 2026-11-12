@@ -25,6 +25,8 @@ const STEP_ID = /^[A-Za-z0-9._:-]{1,128}$/
 const PAYLOAD_ID = /^pay_[a-z2-7]{26}$/
 const INVOCATION_ID = /^inv_[a-z2-7]{26}$/
 const WORKFLOW = /^[A-Za-z0-9_-]{1,64}$/
+// An app's prefixed ID, which names the app wherever its UUID does.
+const APP_SLUG = /^wfa_[a-z0-9]{12}$/
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const QUEUE = /^[a-z0-9][a-z0-9-]{0,62}$/
 const WORKER_ID = /^[A-Za-z0-9._:-]{1,128}$/
@@ -200,7 +202,7 @@ export function validateInvocationResult(r: unknown): void {
 export function validatePollRequest(r: unknown): void {
   if (!isObj(r)) fail("poll isn't an object")
   const p = r as Obj
-  if (!UUID.test(str(p.app))) fail(`app ${JSON.stringify(p.app)}`)
+  if (!UUID.test(str(p.app)) && !APP_SLUG.test(str(p.app))) fail(`app ${JSON.stringify(p.app)}`)
   if (!QUEUE.test(str(p.queue))) fail(`queue ${JSON.stringify(p.queue)}`)
   if (!isInt(p.maxTasks) || p.maxTasks < 1 || p.maxTasks > MAX_POLL_TASKS) fail(`maxTasks ${String(p.maxTasks)}`)
   if (!WORKER_ID.test(str(p.workerId))) fail("workerId")
